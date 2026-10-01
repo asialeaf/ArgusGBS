@@ -16,6 +16,8 @@
 #include <openssl/sha.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <atomic>
 #include <cstring>
@@ -137,9 +139,20 @@ struct WebRtcPlayer {
     std::atomic<bool> keys{false};
     std::atomic<bool> need_key{true};
     srtp_t srtp = nullptr;
+    srtp_t srtp_in = nullptr;
     uint8_t master_key[30]{};
+    uint8_t client_key[30]{};
     uint16_t seq = 1;
     bool srtp_err_logged = false;
+    bool rtcp_err_logged = false;
+    bool fb_logged = false;
+    int64_t last_key_req = 0;
+    struct Hist {
+        uint16_t seq = 0;
+        std::vector<uint8_t> rtp;
+    };
+    std::vector<Hist> hist;
+    size_t hist_n = 0;
 
     ~WebRtcPlayer() {
         run = false;
@@ -156,6 +169,7 @@ struct WebRtcPlayer {
         }
         if (ssl) SSL_free(ssl);
         if (srtp) srtp_dealloc(srtp);
+        if (srtp_in) srtp_dealloc(srtp_in);
     }
 
     void ensure_ssl() {
@@ -187,10 +201,15 @@ struct WebRtcPlayer {
     void export_keys() {
         unsigned char material[60];
         if (SSL_export_keying_material(ssl, material, 60, "EXTRACTOR-dtls_srtp", 19, nullptr, 0, 0) != 1) return;
-        const uint8_t* master = SSL_is_server(ssl) ? material + 16 : material;
-        const uint8_t* salt = SSL_is_server(ssl) ? material + 46 : material + 32;
-        memcpy(master_key, master, 16);
-        memcpy(master_key + 16, salt, 14);
+        bool server = SSL_is_server(ssl);
+        const uint8_t* out_key = server ? material + 16 : material;
+        const uint8_t* out_salt = server ? material + 46 : material + 32;
+        const uint8_t* in_key = server ? material : material + 16;
+        const uint8_t* in_salt = server ? material + 32 : material + 46;
+        memcpy(master_key, out_key, 16);
+        memcpy(master_key + 16, out_salt, 14);
+        memcpy(client_key, in_key, 16);
+        memcpy(client_key + 16, in_salt, 14);
         ensure_srtp();
         srtp_policy_t policy;
         memset(&policy, 0, sizeof(policy));
@@ -200,11 +219,23 @@ struct WebRtcPlayer {
         policy.ssrc.value = 0;
         policy.key = master_key;
         policy.allow_repeat_tx = 1;
-        policy.window_size = 1024;
+        policy.window_size = 32767;
         policy.next = nullptr;
         if (srtp_create(&srtp, &policy) != srtp_err_status_ok) {
             std::cerr << "WebRTC srtp_create 失败" << std::endl;
             return;
+        }
+        srtp_policy_t inpol;
+        memset(&inpol, 0, sizeof(inpol));
+        srtp_crypto_policy_set_aes_cm_128_hmac_sha1_80(&inpol.rtp);
+        srtp_crypto_policy_set_aes_cm_128_hmac_sha1_80(&inpol.rtcp);
+        inpol.ssrc.type = ssrc_any_inbound;
+        inpol.key = client_key;
+        inpol.window_size = 128;
+        inpol.next = nullptr;
+        if (srtp_create(&srtp_in, &inpol) != srtp_err_status_ok) {
+            std::cerr << "WebRTC srtp 入向创建失败" << std::endl;
+            srtp_in = nullptr;
         }
         keys = true;
         dtls_done = true;
@@ -301,6 +332,7 @@ struct WebRtcPlayer {
                 if (n <= 0) continue;
                 if (buf[0] < 2) on_stun(buf, (size_t)n, from);
                 else if (buf[0] >= 20 && buf[0] <= 63) on_dtls(buf, (size_t)n, from);
+                else if ((buf[0] & 0xC0) == 0x80) on_rtcp(buf, (size_t)n, from);
             } else if (ssl && !dtls_done && have_peer) {
                 std::lock_guard<std::mutex> lk(mu);
                 flush_dtls();
@@ -308,15 +340,24 @@ struct WebRtcPlayer {
         }
     }
 
-    void srtp_send(const uint8_t* rtp, size_t n) {
-        if (!keys || !srtp || n < 12 || fd < 0) return;
-        std::lock_guard<std::mutex> lk(mu);
-        if (!have_peer) return;
+    void remember_locked(uint16_t s, const uint8_t* rtp, size_t n) {
+        if (hist.size() < 768) hist.emplace_back();
+        auto& h = hist[hist_n % hist.size()];
+        hist_n++;
+        h.seq = s;
+        h.rtp.assign(rtp, rtp + n);
+    }
+
+    void protect_send_locked(const uint8_t* rtp, size_t n, bool assign_seq) {
+        if (!srtp || n < 12 || fd < 0 || !have_peer) return;
         std::vector<uint8_t> pkt(n + SRTP_MAX_TRAILER_LEN);
         memcpy(pkt.data(), rtp, n);
-        uint16_t s = seq++;
-        pkt[2] = (uint8_t)(s >> 8);
-        pkt[3] = (uint8_t)s;
+        if (assign_seq) {
+            uint16_t s = seq++;
+            pkt[2] = (uint8_t)(s >> 8);
+            pkt[3] = (uint8_t)s;
+            remember_locked(s, pkt.data(), n);
+        }
         int len = (int)n;
         srtp_err_status_t err = srtp_protect(srtp, pkt.data(), &len);
         if (err != srtp_err_status_ok) {
@@ -327,6 +368,79 @@ struct WebRtcPlayer {
             return;
         }
         sendto(fd, pkt.data(), len, MSG_NOSIGNAL, (sockaddr*)&peer, sizeof(peer));
+    }
+
+    bool resend_locked(uint16_t s) {
+        for (auto& h : hist) {
+            if (h.rtp.size() >= 12 && h.seq == s) {
+                protect_send_locked(h.rtp.data(), h.rtp.size(), false);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void request_key_locked() {
+        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+        if (now - last_key_req < 400) return;
+        last_key_req = now;
+        need_key = true;
+    }
+
+    void on_rtcp(uint8_t* buf, size_t n, const sockaddr_in& from) {
+        std::lock_guard<std::mutex> lk(mu);
+        peer = from;
+        have_peer = true;
+        if (!srtp_in || n < 8) return;
+        std::vector<uint8_t> pkt(buf, buf + n);
+        int len = (int)n;
+        srtp_err_status_t err = srtp_unprotect_rtcp(srtp_in, pkt.data(), &len);
+        if (err != srtp_err_status_ok) {
+            if (!rtcp_err_logged) {
+                rtcp_err_logged = true;
+                std::cerr << "WebRTC RTCP 解密失败 " << (int)err << std::endl;
+            }
+            return;
+        }
+        bool any_nack = false;
+        bool miss = false;
+        size_t off = 0;
+        while (off + 4 <= (size_t)len) {
+            uint8_t fmt = pkt[off] & 0x1F;
+            uint8_t pt = pkt[off + 1];
+            uint16_t words = (pkt[off + 2] << 8) | pkt[off + 3];
+            size_t plen = ((size_t)words + 1) * 4;
+            if (plen < 4 || off + plen > (size_t)len) break;
+            if (pt == 205 && fmt == 1 && plen >= 16) {
+                any_nack = true;
+                for (size_t i = off + 12; i + 4 <= off + plen; i += 4) {
+                    uint16_t pid = (pkt[i] << 8) | pkt[i + 1];
+                    uint16_t blp = (pkt[i + 2] << 8) | pkt[i + 3];
+                    if (!resend_locked(pid)) miss = true;
+                    for (int b = 0; b < 16; ++b) {
+                        if (blp & (1u << b)) {
+                            if (!resend_locked((uint16_t)(pid + 1 + b))) miss = true;
+                        }
+                    }
+                }
+            } else if (pt == 206 && fmt == 1) {
+                request_key_locked();
+            }
+            off += plen;
+        }
+        if (miss) request_key_locked();
+        if (any_nack && !fb_logged) {
+            fb_logged = true;
+            std::cerr << "WebRTC 收到 NACK，补发丢失的包" << std::endl;
+        }
+    }
+
+    void srtp_send(const uint8_t* rtp, size_t n) {
+        if (!keys || !srtp || n < 12 || fd < 0) return;
+        std::lock_guard<std::mutex> lk(mu);
+        protect_send_locked(rtp, n, true);
     }
 };
 
@@ -345,9 +459,9 @@ static const uint8_t* nal_bytes(const NAL& n, size_t& len) {
     return p;
 }
 
-static void put_rtp(uint8_t* h, uint16_t seq, uint32_t ts, uint32_t ssrc, bool marker) {
+static void put_rtp(uint8_t* h, uint16_t seq, uint32_t ts, uint32_t ssrc, bool marker, uint8_t pt) {
     h[0] = 0x80;
-    h[1] = (uint8_t)((marker ? 0x80 : 0) | 96);
+    h[1] = (uint8_t)((marker ? 0x80 : 0) | (pt & 0x7F));
     h[2] = (uint8_t)(seq >> 8);
     h[3] = (uint8_t)seq;
     h[4] = (uint8_t)(ts >> 24);
@@ -374,29 +488,39 @@ static int h264_type(const NAL& n) {
     return nal[0] & 0x1F;
 }
 
-static std::vector<std::vector<uint8_t>> packetize_nals(const std::vector<NAL>& nals, uint32_t ts90, uint32_t ssrc) {
+static bool h264_skip(int t) {
+    return t == 6 || t == 9 || t == 10 || t == 11 || t == 12;
+}
+
+static std::vector<std::vector<uint8_t>> packetize_nals(const std::vector<NAL>& nals, uint32_t ts90, uint32_t ssrc, uint8_t pt) {
+    int last_vcl = -1;
+    for (size_t i = 0; i < nals.size(); ++i) {
+        int t = h264_type(nals[i]);
+        if (t == 1 || t == 5) last_vcl = (int)i;
+    }
     std::vector<std::vector<uint8_t>> all;
     uint16_t seq = 1;
     for (size_t i = 0; i < nals.size(); ++i) {
-        if (nals[i].h265) continue;
+        int t = h264_type(nals[i]);
+        if (t < 0 || h264_skip(t)) continue;
         size_t len = 0;
         const uint8_t* nal = nal_bytes(nals[i], len);
         if (!nal || len == 0) continue;
-        bool marker = i + 1 == nals.size();
-        if (len <= 1100) {
+        bool marker = (int)i == last_vcl;
+        if (len <= 1000) {
             std::vector<uint8_t> pkt(12 + len);
-            put_rtp(pkt.data(), seq++, ts90, ssrc, marker);
+            put_rtp(pkt.data(), seq++, ts90, ssrc, marker, pt);
             memcpy(pkt.data() + 12, nal, len);
             all.push_back(std::move(pkt));
         } else {
             uint8_t nalh = nal[0];
             size_t off = 1;
             while (off < len) {
-                size_t chunk = std::min((size_t)1100, len - off);
+                size_t chunk = std::min((size_t)1000, len - off);
                 bool start = off == 1;
                 bool end = off + chunk >= len;
                 std::vector<uint8_t> pkt(14 + chunk);
-                put_rtp(pkt.data(), seq++, ts90, ssrc, end && marker);
+                put_rtp(pkt.data(), seq++, ts90, ssrc, end && marker, pt);
                 pkt[12] = (uint8_t)((nalh & 0xE0) | 28);
                 pkt[13] = (uint8_t)((start ? 0x80 : 0) | (end ? 0x40 : 0) | (nalh & 0x1F));
                 memcpy(pkt.data() + 14, nal + off, chunk);
@@ -437,16 +561,28 @@ void rtc_send(Session* s, const std::vector<NAL>& nals, uint32_t ts90) {
     }
     if (viewers.empty()) return;
     uint32_t ssrc = s->ssrc.empty() ? 1u : (uint32_t)strtoul(s->ssrc.c_str(), nullptr, 10);
-    auto cur = packetize_nals(framed, ts90, ssrc);
+    uint8_t pt = s->rtc_pt ? s->rtc_pt : 96;
+    uint32_t ts = ts90 + 90000;
+    auto cur = packetize_nals(framed, ts, ssrc, pt);
+    bool want_gop = false;
+    if (!idr) {
+        for (auto& v : viewers) {
+            if (std::static_pointer_cast<WebRtcPlayer>(v)->need_key) {
+                want_gop = true;
+                break;
+            }
+        }
+    }
     std::vector<std::vector<uint8_t>> gop_pkts;
-    if (!idr && !gop.empty()) {
-        uint32_t gop_ts = ts90 > 3600 ? ts90 - 3600 : 0;
-        gop_pkts = packetize_nals(gop, gop_ts, ssrc);
+    if (want_gop && !gop.empty()) {
+        uint32_t gop_ts = ts - 1800;
+        gop_pkts = packetize_nals(gop, gop_ts, ssrc, pt);
     }
     for (auto& v : viewers) {
         auto p = std::static_pointer_cast<WebRtcPlayer>(v);
         if (!p->keys) continue;
-        if (p->need_key && !idr && !gop_pkts.empty()) {
+        if (p->need_key && !idr) {
+            if (gop_pkts.empty()) continue;
             for (auto& pkt : gop_pkts) p->srtp_send(pkt.data(), pkt.size());
             p->need_key = false;
         }
@@ -480,6 +616,7 @@ bool Hub::whep(const std::string& id, const std::string& offer, bool as_json, in
         bool audio = false;
         std::string mid;
         std::string proto = "UDP/TLS/RTP/SAVPF";
+        int h264_pt = 0;
     };
     std::vector<MLine> lines;
     MLine cur;
@@ -500,6 +637,9 @@ bool Hub::whep(const std::string& id, const std::string& offer, bool as_json, in
             if (!proto.empty()) cur.proto = proto;
         } else if (in && line.rfind("a=mid:", 0) == 0) {
             cur.mid = sdp_line_value(line);
+        } else if (in && cur.video && line.rfind("a=rtpmap:", 0) == 0 && line.find("H264/90000") != std::string::npos) {
+            int pt = std::atoi(sdp_line_value(line).c_str());
+            if (pt > 0 && pt < 128) cur.h264_pt = pt;
         }
     }
     if (in) lines.push_back(cur);
@@ -523,6 +663,9 @@ bool Hub::whep(const std::string& id, const std::string& offer, bool as_json, in
         int fd = socket(AF_INET, SOCK_DGRAM, 0);
         int opt = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        int bufsz = 1 << 20;
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsz, sizeof(bufsz));
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsz, sizeof(bufsz));
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons((uint16_t)port);
@@ -543,6 +686,14 @@ bool Hub::whep(const std::string& id, const std::string& offer, bool as_json, in
     std::string ip = public_ip();
     std::string fp = dtls_cert().fingerprint;
     uint32_t ssrc = s->ssrc.empty() ? 1u : (uint32_t)strtoul(s->ssrc.c_str(), nullptr, 10);
+    int h264_pt = 96;
+    for (auto& m : lines) {
+        if (m.video && m.h264_pt > 0) {
+            h264_pt = m.h264_pt;
+            break;
+        }
+    }
+    s->rtc_pt = (uint8_t)h264_pt;
     char pli[16] = "42e01f";
     if (s->sps.size() >= 4) snprintf(pli, sizeof(pli), "%02x%02x%02x", s->sps[1], s->sps[2], s->sps[3]);
     std::string sprop;
@@ -567,17 +718,26 @@ bool Hub::whep(const std::string& id, const std::string& offer, bool as_json, in
         auto& m = lines[i];
         std::string mid = m.mid.empty() ? std::to_string(i) : m.mid;
         if (m.video) {
-            sdp << "m=video " << player->port << " " << m.proto << " 96\r\n"
+            int pt = m.h264_pt > 0 ? m.h264_pt : h264_pt;
+            sdp << "m=video " << player->port << " " << m.proto << " " << pt << "\r\n"
                 << "c=IN IP4 " << ip << "\r\n"
+                << "a=ice-ufrag:" << player->ufrag << "\r\n"
+                << "a=ice-pwd:" << player->pwd << "\r\n"
+                << "a=fingerprint:sha-256 " << fp << "\r\n"
+                << "a=setup:" << (we_server ? "passive" : "active") << "\r\n"
                 << "a=mid:" << mid << "\r\n"
                 << "a=sendonly\r\n"
                 << "a=rtcp-mux\r\n"
                 << "a=rtcp:" << player->port << " IN IP4 " << ip << "\r\n"
-                << "a=rtpmap:96 H264/90000\r\n"
-                << "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=" << pli;
+                << "a=rtpmap:" << pt << " H264/90000\r\n"
+                << "a=fmtp:" << pt << " level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=" << pli;
             if (!sprop.empty()) sdp << ";sprop-parameter-sets=" << sprop;
             sdp << "\r\n"
+                << "a=rtcp-fb:" << pt << " nack\r\n"
+                << "a=rtcp-fb:" << pt << " nack pli\r\n"
+                << "a=msid:argussms video0\r\n"
                 << "a=ssrc:" << ssrc << " cname:argussms\r\n"
+                << "a=ssrc:" << ssrc << " msid:argussms video0\r\n"
                 << "a=candidate:1 1 udp 2130706431 " << ip << " " << player->port << " typ host\r\n";
         } else {
             sdp << "m=audio 0 " << m.proto << " 0\r\n"

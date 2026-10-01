@@ -265,6 +265,7 @@ void handle_client(Hub* hub, int fd) {
         if (mode.empty()) mode = "passive";
         if (id.empty()) { http_json(fd, 400, "{\"error\":\"stream_id\"}"); close(fd); return; }
         auto s = hub->open(id, tr, mode, ssrc, peer, peer_port);
+        if (!s) { http_json(fd, 500, "{\"error\":\"no rtp port\"}"); close(fd); return; }
         std::string ip = hub->public_ip();
         http_json(fd, 200, "{\"ip\":\"" + ip + "\",\"public_ip\":\"" + ip + "\",\"port\":" + std::to_string(s->port) + "}");
         close(fd);

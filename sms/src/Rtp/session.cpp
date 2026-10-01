@@ -511,43 +511,44 @@ std::shared_ptr<Session> Hub::open(const std::string& id, const std::string& tra
     s->transport = transport;
     s->mode = mode;
     s->ssrc = ssrc;
-    if (next_port_ < udp_min || next_port_ > udp_max) next_port_ = udp_min;
-    int port = next_port_++;
-    if (next_port_ > udp_max) next_port_ = udp_min;
+    int span = udp_max - udp_min + 1;
+    if (span < 1) span = 1;
+    int port = 0;
+    int fd = -1;
+    bool tcp = transport == "TCP";
+    for (int n = 0; n < span; ++n) {
+        if (next_port_ < udp_min || next_port_ > udp_max) next_port_ = udp_min;
+        int try_port = next_port_++;
+        if (next_port_ > udp_max) next_port_ = udp_min;
+        int sfd = socket(AF_INET, tcp ? SOCK_STREAM : SOCK_DGRAM, 0);
+        if (sfd < 0) break;
+        int opt = 1;
+        setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons((uint16_t)try_port);
+        addr.sin_addr.s_addr = INADDR_ANY;
+        if (bind(sfd, (sockaddr*)&addr, sizeof(addr)) == 0) {
+            port = try_port;
+            fd = sfd;
+            break;
+        }
+        ::close(sfd);
+    }
+    if (fd < 0) {
+        std::cerr << "RTP 端口 " << udp_min << "-" << udp_max << " 已用尽，无法收流 " << id << std::endl;
+        return nullptr;
+    }
     s->port = port;
     if (transport == "TCP" && mode == "active") {
         // 端口留给 SDP。设备 200 OK 之后由 relay 连过去，这里不 accept。
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
-        int opt = 1;
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = INADDR_ANY;
-        bind(fd, (sockaddr*)&addr, sizeof(addr));
         s->tcp_fd = fd;
         if (!peer_ip.empty() && peer_port > 0) s->start_recv_tcp(s, peer_ip, peer_port);
     } else if (transport == "TCP") {
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
-        int opt = 1;
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = INADDR_ANY;
-        bind(fd, (sockaddr*)&addr, sizeof(addr));
         listen(fd, 4);
         s->tcp_fd = fd;
         s->worker = std::thread(sms_tcp_loop, s);
     } else {
-        int fd = socket(AF_INET, SOCK_DGRAM, 0);
-        int opt = 1;
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = INADDR_ANY;
-        bind(fd, (sockaddr*)&addr, sizeof(addr));
         s->udp_fd = fd;
         s->worker = std::thread(udp_loop, s);
     }

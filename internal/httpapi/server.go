@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -761,6 +762,7 @@ func (a *API) play(w http.ResponseWriter, r *http.Request, playback bool) {
 	if !playback {
 		if old, err := a.DB.FindLiveStream(serial, code); err == nil && old != nil && !old.Stopped {
 			a.fillStats(old)
+			old.SnapURL = a.snapURL(old.DeviceID, old.ChannelID)
 			writeJSON(w, old)
 			return
 		}
@@ -822,8 +824,13 @@ func (a *API) play(w http.ResponseWriter, r *http.Request, playback bool) {
 	if !playback {
 		snapPath := a.snapFile(dev.ID, ch.ID)
 		go func() {
-			time.Sleep(2 * time.Second)
-			a.refreshSnap(ssrc, snapPath)
+			for _, wait := range []time.Duration{2 * time.Second, 4 * time.Second} {
+				time.Sleep(wait)
+				a.refreshSnap(ssrc, snapPath)
+				if st, err := os.Stat(snapPath); err == nil && !st.IsDir() && st.Size() > 0 {
+					return
+				}
+			}
 		}()
 	}
 	writeJSON(w, st)
@@ -910,12 +917,22 @@ func (a *API) refreshSnap(streamID, path string) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	tmp := path + ".part"
-	cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-frames:v", "1", "-q:v", "5", tmp)
-	if err := cmd.Run(); err != nil {
+	tmp := path + ".part.jpg"
+	cmd := exec.CommandContext(ctx, ffmpeg,
+		"-hide_banner", "-loglevel", "error",
+		"-rw_timeout", "6000000",
+		"-analyzeduration", "0", "-probesize", "32768",
+		"-fflags", "nobuffer",
+		"-y", "-i", src, "-frames:v", "1", "-q:v", "5", tmp)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		_ = os.Remove(tmp)
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			log.Printf("截图失败 %s: %s", streamID, msg)
+		}
 		return
 	}
 	_ = os.Rename(tmp, path)
@@ -983,6 +1000,9 @@ func (a *API) streamList(w http.ResponseWriter, r *http.Request) {
 	list, _ := a.DB.ListStreams(false)
 	for i := range list {
 		a.fillStats(&list[i])
+		if list[i].DeviceID != "" && list[i].ChannelID != "" {
+			list[i].SnapURL = a.snapURL(list[i].DeviceID, list[i].ChannelID)
+		}
 	}
 	writeJSON(w, map[string]any{"StreamCount": len(list), "StreamList": list})
 }

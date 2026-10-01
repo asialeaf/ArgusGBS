@@ -90,7 +90,7 @@ module.exports = {
             }),
             new CopyWebpackPlugin([
                 { from: 'externals', to: outputDir },
-                { from: 'node_modules/@liveqing/liveplayer/dist/component/liveplayer-lib.min.js', to: path.join(outputDir, 'js') },
+                { from: 'externals/js/liveplayer-lib.min.js', to: path.join(outputDir, 'js') },
                 { from: 'node_modules/@liveqing/liveplayer/dist/component/liveplayer.swf', to: outputDir }
             ])
         ]

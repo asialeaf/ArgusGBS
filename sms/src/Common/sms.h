@@ -226,6 +226,7 @@ public:
     std::vector<int> rtmp;
     std::vector<std::shared_ptr<void>> rtc;
     std::vector<NAL> rtc_gop;
+    uint8_t rtc_pt = 96;
 
     bool start_recv_tcp(std::shared_ptr<Session> self, const std::string& ip, int port);
     int start_send_relay(std::shared_ptr<Session> self, const std::string& transport, const std::string& mode, const std::string& ip, int port, int listen_port);

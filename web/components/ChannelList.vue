@@ -658,12 +658,22 @@ export default {
 		playStream(row) {
 			this.loading = true;
 			this.$set(row, "Locked", true);
+			var dlg = this.$refs["videoDlg"];
+			if (dlg) {
+				dlg.videoTitle = row.CustomName || row.Name || row.ID;
+				dlg.snapUrl = row.SnapURL || "";
+				dlg.videoUrl = "";
+				dlg.protocol = "";
+				$(dlg.$el).modal("show");
+			}
 			this.xhr = $.post("/api/v1/stream/start", {
 				serial: row.DeviceID,
 				code: row.ID
 			});
 			this.xhr.then(streamInfo => {
 				this.$refs["videoDlg"].play(row.CustomName||row.Name||row.ID, row.DeviceID, row.ID, streamInfo);
+			}).fail(() => {
+				if (dlg) $(dlg.$el).modal("hide");
 			}).always(() => {
 				this.xhr = null;
 				this.loading = false;
