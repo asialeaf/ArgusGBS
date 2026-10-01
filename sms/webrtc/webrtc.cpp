@@ -11,6 +11,7 @@
 #include <openssl/ssl.h>
 #include <openssl/srtp.h>
 #include <openssl/x509.h>
+#include <srtp2/srtp.h>
 
 #include <openssl/sha.h>
 
@@ -113,16 +114,9 @@ static DtlsCert& dtls_cert() {
     return c;
 }
 
-static void kdf(const uint8_t* master, const uint8_t* salt14, uint8_t label, uint8_t* out, int len) {
-    uint8_t iv[16] = {};
-    memcpy(iv, salt14, 14);
-    iv[7] ^= label;
-    EVP_CIPHER_CTX* c = EVP_CIPHER_CTX_new();
-    EVP_EncryptInit_ex(c, EVP_aes_128_ctr(), nullptr, master, iv);
-    std::vector<uint8_t> zeros(len);
-    int outl = 0;
-    EVP_EncryptUpdate(c, out, &outl, zeros.data(), len);
-    EVP_CIPHER_CTX_free(c);
+static void ensure_srtp() {
+    static std::once_flag once;
+    std::call_once(once, [] { srtp_init(); });
 }
 
 struct WebRtcPlayer {
@@ -140,12 +134,12 @@ struct WebRtcPlayer {
     BIO* rbio = nullptr;
     BIO* wbio = nullptr;
     bool dtls_done = false;
-    bool keys = false;
-    uint8_t rtp_key[16]{};
-    uint8_t rtp_salt[14]{};
-    uint8_t auth_key[20]{};
+    std::atomic<bool> keys{false};
+    std::atomic<bool> need_key{true};
+    srtp_t srtp = nullptr;
+    uint8_t master_key[30]{};
     uint16_t seq = 1;
-    uint32_t roc = 0;
+    bool srtp_err_logged = false;
 
     ~WebRtcPlayer() {
         run = false;
@@ -161,6 +155,7 @@ struct WebRtcPlayer {
             fd = -1;
         }
         if (ssl) SSL_free(ssl);
+        if (srtp) srtp_dealloc(srtp);
     }
 
     void ensure_ssl() {
@@ -194,13 +189,26 @@ struct WebRtcPlayer {
         if (SSL_export_keying_material(ssl, material, 60, "EXTRACTOR-dtls_srtp", 19, nullptr, 0, 0) != 1) return;
         const uint8_t* master = SSL_is_server(ssl) ? material + 16 : material;
         const uint8_t* salt = SSL_is_server(ssl) ? material + 46 : material + 32;
-        uint8_t session_salt[14];
-        kdf(master, salt, 0x00, rtp_key, 16);
-        kdf(master, salt, 0x01, auth_key, 20);
-        kdf(master, salt, 0x02, session_salt, 14);
-        memcpy(rtp_salt, session_salt, 14);
+        memcpy(master_key, master, 16);
+        memcpy(master_key + 16, salt, 14);
+        ensure_srtp();
+        srtp_policy_t policy;
+        memset(&policy, 0, sizeof(policy));
+        srtp_crypto_policy_set_aes_cm_128_hmac_sha1_80(&policy.rtp);
+        srtp_crypto_policy_set_aes_cm_128_hmac_sha1_80(&policy.rtcp);
+        policy.ssrc.type = ssrc_any_outbound;
+        policy.ssrc.value = 0;
+        policy.key = master_key;
+        policy.allow_repeat_tx = 1;
+        policy.window_size = 1024;
+        policy.next = nullptr;
+        if (srtp_create(&srtp, &policy) != srtp_err_status_ok) {
+            std::cerr << "WebRTC srtp_create 失败" << std::endl;
+            return;
+        }
         keys = true;
         dtls_done = true;
+        need_key = true;
         std::cerr << "WebRTC DTLS 完成，开始发 SRTP" << std::endl;
     }
 
@@ -301,37 +309,24 @@ struct WebRtcPlayer {
     }
 
     void srtp_send(const uint8_t* rtp, size_t n) {
-        if (!keys || n < 12 || fd < 0) return;
+        if (!keys || !srtp || n < 12 || fd < 0) return;
         std::lock_guard<std::mutex> lk(mu);
         if (!have_peer) return;
-        std::vector<uint8_t> pkt(rtp, rtp + n);
-        uint16_t s = seq;
-        if (s == 0) roc++;
-        seq++;
+        std::vector<uint8_t> pkt(n + SRTP_MAX_TRAILER_LEN);
+        memcpy(pkt.data(), rtp, n);
+        uint16_t s = seq++;
         pkt[2] = (uint8_t)(s >> 8);
         pkt[3] = (uint8_t)s;
-        uint32_t ssrc = ((uint32_t)pkt[8] << 24) | ((uint32_t)pkt[9] << 16) | ((uint32_t)pkt[10] << 8) | pkt[11];
-        uint64_t index = ((uint64_t)roc << 16) | s;
-        uint8_t iv[16] = {};
-        memcpy(iv, rtp_salt, 14);
-        iv[4] ^= (uint8_t)(ssrc >> 24);
-        iv[5] ^= (uint8_t)(ssrc >> 16);
-        iv[6] ^= (uint8_t)(ssrc >> 8);
-        iv[7] ^= (uint8_t)ssrc;
-        for (int i = 0; i < 6; ++i) iv[8 + i] ^= (uint8_t)(index >> (40 - 8 * i));
-        int outl = 0;
-        EVP_CIPHER_CTX* c = EVP_CIPHER_CTX_new();
-        EVP_EncryptInit_ex(c, EVP_aes_128_ctr(), nullptr, rtp_key, iv);
-        EVP_EncryptUpdate(c, pkt.data() + 12, &outl, pkt.data() + 12, (int)(pkt.size() - 12));
-        EVP_CIPHER_CTX_free(c);
-        uint8_t rocbe[4] = {(uint8_t)(roc >> 24), (uint8_t)(roc >> 16), (uint8_t)(roc >> 8), (uint8_t)roc};
-        std::vector<uint8_t> auth_in = pkt;
-        auth_in.insert(auth_in.end(), rocbe, rocbe + 4);
-        unsigned char mac[20];
-        unsigned int maclen = 20;
-        HMAC(EVP_sha1(), auth_key, 20, auth_in.data(), auth_in.size(), mac, &maclen);
-        pkt.insert(pkt.end(), mac, mac + 10);
-        sendto(fd, pkt.data(), pkt.size(), MSG_NOSIGNAL, (sockaddr*)&peer, sizeof(peer));
+        int len = (int)n;
+        srtp_err_status_t err = srtp_protect(srtp, pkt.data(), &len);
+        if (err != srtp_err_status_ok) {
+            if (!srtp_err_logged) {
+                srtp_err_logged = true;
+                std::cerr << "WebRTC srtp_protect 失败 " << (int)err << std::endl;
+            }
+            return;
+        }
+        sendto(fd, pkt.data(), len, MSG_NOSIGNAL, (sockaddr*)&peer, sizeof(peer));
     }
 };
 
@@ -372,14 +367,15 @@ void rtc_stop(const std::shared_ptr<void>& player) {
     if (p->fd >= 0) shutdown(p->fd, SHUT_RDWR);
 }
 
-void rtc_send(Session* s, const std::vector<NAL>& nals, uint32_t ts90) {
-    std::vector<std::shared_ptr<void>> viewers;
-    {
-        std::lock_guard<std::mutex> lk(s->dist_mu);
-        viewers = s->rtc;
-    }
-    if (viewers.empty()) return;
-    uint32_t ssrc = s->ssrc.empty() ? 1u : (uint32_t)strtoul(s->ssrc.c_str(), nullptr, 10);
+static int h264_type(const NAL& n) {
+    size_t len = 0;
+    const uint8_t* nal = nal_bytes(n, len);
+    if (!nal || len == 0 || n.h265) return -1;
+    return nal[0] & 0x1F;
+}
+
+static std::vector<std::vector<uint8_t>> packetize_nals(const std::vector<NAL>& nals, uint32_t ts90, uint32_t ssrc) {
+    std::vector<std::vector<uint8_t>> all;
     uint16_t seq = 1;
     for (size_t i = 0; i < nals.size(); ++i) {
         if (nals[i].h265) continue;
@@ -387,13 +383,11 @@ void rtc_send(Session* s, const std::vector<NAL>& nals, uint32_t ts90) {
         const uint8_t* nal = nal_bytes(nals[i], len);
         if (!nal || len == 0) continue;
         bool marker = i + 1 == nals.size();
-        std::vector<std::vector<uint8_t>> pkts;
-        auto emit = [&](const uint8_t* p, size_t n) { pkts.emplace_back(p, p + n); };
         if (len <= 1100) {
             std::vector<uint8_t> pkt(12 + len);
             put_rtp(pkt.data(), seq++, ts90, ssrc, marker);
             memcpy(pkt.data() + 12, nal, len);
-            emit(pkt.data(), pkt.size());
+            all.push_back(std::move(pkt));
         } else {
             uint8_t nalh = nal[0];
             size_t off = 1;
@@ -406,14 +400,58 @@ void rtc_send(Session* s, const std::vector<NAL>& nals, uint32_t ts90) {
                 pkt[12] = (uint8_t)((nalh & 0xE0) | 28);
                 pkt[13] = (uint8_t)((start ? 0x80 : 0) | (end ? 0x40 : 0) | (nalh & 0x1F));
                 memcpy(pkt.data() + 14, nal + off, chunk);
-                emit(pkt.data(), pkt.size());
+                all.push_back(std::move(pkt));
                 off += chunk;
             }
         }
-        for (auto& v : viewers) {
-            auto p = std::static_pointer_cast<WebRtcPlayer>(v);
-            for (auto& pkt : pkts) p->srtp_send(pkt.data(), pkt.size());
+    }
+    return all;
+}
+
+void rtc_send(Session* s, const std::vector<NAL>& nals, uint32_t ts90) {
+    bool idr = false;
+    bool has_sps = false;
+    for (auto& n : nals) {
+        int t = h264_type(n);
+        if (t == 5) idr = true;
+        if (t == 7) has_sps = true;
+    }
+    std::vector<NAL> framed = nals;
+    if (idr && !has_sps && !s->sps.empty() && !s->pps.empty()) {
+        NAL sps;
+        NAL pps;
+        sps.data = {0, 0, 0, 1};
+        sps.data.insert(sps.data.end(), s->sps.begin(), s->sps.end());
+        pps.data = {0, 0, 0, 1};
+        pps.data.insert(pps.data.end(), s->pps.begin(), s->pps.end());
+        framed.insert(framed.begin(), std::move(pps));
+        framed.insert(framed.begin(), std::move(sps));
+    }
+    std::vector<std::shared_ptr<void>> viewers;
+    std::vector<NAL> gop;
+    {
+        std::lock_guard<std::mutex> lk(s->dist_mu);
+        if (idr) s->rtc_gop = framed;
+        gop = s->rtc_gop;
+        viewers = s->rtc;
+    }
+    if (viewers.empty()) return;
+    uint32_t ssrc = s->ssrc.empty() ? 1u : (uint32_t)strtoul(s->ssrc.c_str(), nullptr, 10);
+    auto cur = packetize_nals(framed, ts90, ssrc);
+    std::vector<std::vector<uint8_t>> gop_pkts;
+    if (!idr && !gop.empty()) {
+        uint32_t gop_ts = ts90 > 3600 ? ts90 - 3600 : 0;
+        gop_pkts = packetize_nals(gop, gop_ts, ssrc);
+    }
+    for (auto& v : viewers) {
+        auto p = std::static_pointer_cast<WebRtcPlayer>(v);
+        if (!p->keys) continue;
+        if (p->need_key && !idr && !gop_pkts.empty()) {
+            for (auto& pkt : gop_pkts) p->srtp_send(pkt.data(), pkt.size());
+            p->need_key = false;
         }
+        for (auto& pkt : cur) p->srtp_send(pkt.data(), pkt.size());
+        if (idr) p->need_key = false;
     }
 }
 
