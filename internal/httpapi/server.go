@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -42,6 +44,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/getrequestkey", a.auth(a.requestKey))
 	mux.HandleFunc("GET /api/v1/sms/getrequestkey", a.auth(a.smsRequestKey))
 	mux.HandleFunc("GET /api/v1/sms/getserverinfo", a.auth(a.smsServerInfo))
+	mux.HandleFunc("GET /sms/{serial}/snap/{device}/{name}", a.auth(a.channelSnap))
 	mux.HandleFunc("POST /api/v1/modifypassword", a.auth(a.modifyPassword))
 	mux.HandleFunc("POST /api/v1/restart", a.auth(a.restart))
 	mux.HandleFunc("GET /api/v1/getbaseconfig", a.auth(a.getBaseConfig))
@@ -510,6 +513,9 @@ func (a *API) channelList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	for i := range list {
+		a.fillSnap(&list[i])
+	}
 	writeJSON(w, map[string]any{"ChannelCount": total, "ChannelList": list})
 }
 
@@ -520,6 +526,7 @@ func (a *API) channelInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "通道不存在", 404)
 		return
 	}
+	a.fillSnap(c)
 	writeJSON(w, c)
 }
 
@@ -812,6 +819,13 @@ func (a *API) play(w http.ResponseWriter, r *http.Request, playback bool) {
 	}
 	st := a.buildStream(r, ssrc, dev, ch, transport, callID, playback, opt.Start, opt.End)
 	_ = a.DB.SaveStream(st)
+	if !playback {
+		snapPath := a.snapFile(dev.ID, ch.ID)
+		go func() {
+			time.Sleep(2 * time.Second)
+			a.refreshSnap(ssrc, snapPath)
+		}()
+	}
 	writeJSON(w, st)
 	a.audit(r, a.currentUser(r), "开始播放", "200")
 }
@@ -841,8 +855,70 @@ func (a *API) buildStream(r *http.Request, ssrc string, dev *model.Device, ch *m
 		RTSP:    fmt.Sprintf("rtsp://%s:%d/live/%s", host, a.Cfg.SMSRTSPPort, ssrc),
 		WEBRTC:  base + "/webrtc/play?stream=" + ssrc,
 		WHEP:    base + "/whep/" + ssrc,
-		SnapURL: ch.SnapURL,
+		SnapURL: a.snapURL(dev.ID, ch.ID),
 	}
+}
+
+func (a *API) fillSnap(c *model.Channel) {
+	if c == nil || c.SubCount > 0 {
+		return
+	}
+	c.SnapURL = a.snapURL(c.DeviceID, c.ID)
+}
+
+func (a *API) snapURL(deviceID, channelID string) string {
+	return fmt.Sprintf("/sms/%s/snap/%s/%s.jpg?t=%d", a.Cfg.SMSSerial, deviceID, channelID, time.Now().UnixNano())
+}
+
+func (a *API) snapFile(deviceID, channelID string) string {
+	base := filepath.Dir(a.Cfg.DBFile)
+	if base == "" || base == "." {
+		base = "data"
+	}
+	return filepath.Join(base, "snap", deviceID, channelID+".jpg")
+}
+
+func (a *API) channelSnap(w http.ResponseWriter, r *http.Request) {
+	device := r.PathValue("device")
+	channel := strings.TrimSuffix(r.PathValue("name"), ".jpg")
+	path := a.snapFile(device, channel)
+	if st, err := a.DB.FindLiveStream(device, channel); err == nil && st != nil && !st.Playback {
+		a.refreshSnap(st.StreamID, path)
+	}
+	if st, err := os.Stat(path); err != nil || st.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "no-cache")
+	http.ServeFile(w, r, path)
+}
+
+func (a *API) refreshSnap(streamID, path string) {
+	if st, err := os.Stat(path); err == nil && time.Since(st.ModTime()) < 3*time.Second {
+		return
+	}
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return
+	}
+	host := a.Cfg.SMSHost
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	src := fmt.Sprintf("http://%s:%d/live/%s.flv", host, a.Cfg.SMSHTTPPort, streamID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	tmp := path + ".part"
+	cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-frames:v", "1", "-q:v", "5", tmp)
+	if err := cmd.Run(); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	_ = os.Rename(tmp, path)
 }
 
 func (a *API) fillStats(st *model.Stream) {
