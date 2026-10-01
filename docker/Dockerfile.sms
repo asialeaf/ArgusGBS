@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends g++ make ca-cer
 WORKDIR /src
 COPY sms ./sms
 RUN mkdir -p /out \
-    && make -C sms CXXFLAGS="-std=c++17 -O2 -Wall -pthread -static-libstdc++ -static-libgcc" \
+    && make -C sms CXXFLAGS="-std=c++17 -O2 -Wall -pthread -static-libstdc++ -static-libgcc" CPPFLAGS="-Isrc" \
     && cp sms/argussms /out/argussms
 
 FROM debian:bookworm-slim

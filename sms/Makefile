@@ -1,5 +1,6 @@
 CXX ?= g++
-CXXFLAGS ?= -std=c++17 -O2 -Wall -pthread -Isrc
+CXXFLAGS ?= -std=c++17 -O2 -Wall -pthread
+CPPFLAGS += -Isrc
 LDLIBS ?= -lssl -lcrypto
 SRC = server/main.cpp \
       src/Common/net.cpp src/Common/playout.cpp src/Common/server.cpp \
@@ -14,7 +15,7 @@ SRC = server/main.cpp \
 all: argussms
 
 argussms: $(SRC) src/Common/sms.h src/Common/net.h src/Record/hls.h src/Rtsp/rtsp.h src/Rtmp/rtmp.h
-	$(CXX) $(CXXFLAGS) -o argussms $(SRC) $(LDLIBS)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o argussms $(SRC) $(LDLIBS)
 
 clean:
 	rm -f argussms
