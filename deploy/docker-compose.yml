@@ -20,8 +20,11 @@ services:
       - argus_sms:/data
     ports:
       - "${SMS_HTTP_PORT:-10001}:10001"
+      - "${RTSP_PORT:-554}:554"
+      - "${RTMP_PORT:-1935}:1935"
       - "${RTP_PORT_RANGE:-30000-30249}:30000-30249/udp"
       - "${RTP_PORT_RANGE:-30000-30249}:30000-30249/tcp"
+      - "${WEBRTC_PORT_RANGE:-30250-30500}:30250-30500/udp"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10001/api/v1/serverinfo"]
       interval: 10s

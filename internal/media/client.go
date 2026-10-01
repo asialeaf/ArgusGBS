@@ -26,17 +26,17 @@ func New(host string, port int, secret string) *Client {
 }
 
 type OpenReq struct {
-	StreamID  string `json:"stream_id"`
-	Transport string `json:"transport"`
-	Mode      string `json:"mode"`
-	SSRC      string `json:"ssrc"`
-	PeerIP    string `json:"peer_ip,omitempty"`
-	PeerPort  int    `json:"peer_port,omitempty"`
+	StreamID   string `json:"stream_id"`
+	Transport  string `json:"transport"`
+	Mode       string `json:"mode"`
+	SSRC       string `json:"ssrc"`
+	PeerIP     string `json:"peer_ip,omitempty"`
+	PeerPort   int    `json:"peer_port,omitempty"`
 	VideoCodec string `json:"video_codec,omitempty"`
-	Width     int    `json:"width,omitempty"`
-	Height    int    `json:"height,omitempty"`
-	Bitrate   int    `json:"bitrate,omitempty"`
-	FrameRate int    `json:"framerate,omitempty"`
+	Width      int    `json:"width,omitempty"`
+	Height     int    `json:"height,omitempty"`
+	Bitrate    int    `json:"bitrate,omitempty"`
+	FrameRate  int    `json:"framerate,omitempty"`
 }
 
 type OpenResp struct {
@@ -46,19 +46,19 @@ type OpenResp struct {
 }
 
 type Stats struct {
-	StreamID     string `json:"stream_id"`
-	Codec        string `json:"codec"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	FPS          int    `json:"fps"`
-	RTPCount     int64  `json:"rtp_count"`
-	RTPLost      int64  `json:"rtp_lost"`
-	InBytes      int64  `json:"in_bytes"`
-	InBitRate    int    `json:"in_bitrate"`
-	VideoFrames  int64  `json:"video_frames"`
-	NumOutputs   int    `json:"num_outputs"`
-	AudioCodec   string `json:"audio_codec"`
-	Ready        bool   `json:"ready"`
+	StreamID    string `json:"stream_id"`
+	Codec       string `json:"codec"`
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
+	FPS         int    `json:"fps"`
+	RTPCount    int64  `json:"rtp_count"`
+	RTPLost     int64  `json:"rtp_lost"`
+	InBytes     int64  `json:"in_bytes"`
+	InBitRate   int    `json:"in_bitrate"`
+	VideoFrames int64  `json:"video_frames"`
+	NumOutputs  int    `json:"num_outputs"`
+	AudioCodec  string `json:"audio_codec"`
+	Ready       bool   `json:"ready"`
 }
 
 func (c *Client) Open(req OpenReq) (*OpenResp, error) {
@@ -76,11 +76,15 @@ func (c *Client) Close(streamID string) error {
 	return c.post("/api/v1/rtp/close", map[string]string{"stream_id": streamID}, nil)
 }
 
-func (c *Client) Relay(streamID, transport, mode, peerIP string, peerPort int, ssrc string) error {
-	return c.post("/api/v1/rtp/relay", map[string]any{
+func (c *Client) Relay(streamID, transport, mode, peerIP string, peerPort int, ssrc, direction string) (int, error) {
+	var out struct {
+		Port int `json:"port"`
+	}
+	err := c.post("/api/v1/rtp/relay", map[string]any{
 		"stream_id": streamID, "transport": transport, "mode": mode,
-		"peer_ip": peerIP, "peer_port": peerPort, "ssrc": ssrc,
-	}, nil)
+		"peer_ip": peerIP, "peer_port": peerPort, "ssrc": ssrc, "direction": direction,
+	}, &out)
+	return out.Port, err
 }
 
 func (c *Client) Stats(streamID string) (*Stats, error) {

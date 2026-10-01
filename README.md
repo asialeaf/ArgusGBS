@@ -53,10 +53,12 @@ npm run start
 `/api/v1/stream/start` 返回的地址指向 ArgusSMS：
 
 - HTTP-FLV：`http://{host}:10001/live/{ssrc}.flv`
-- HLS：`http://{host}:10001/live/{ssrc}/index.m3u8`
-- RTSP / RTMP / WebRTC / WHEP 字段已按 LiveGBS 返回，便于前端切换协议
+- HLS：`http://{host}:10001/live/{ssrc}/index.m3u8`，切片是内存里的 MPEG-TS
+- RTSP：`rtsp://{host}:554/live/{ssrc}`，支持 UDP 和 TCP 交织
+- RTMP：`rtmp://{host}:1935/live/{ssrc}`
+- WebRTC：`http://{host}:10001/whep/{ssrc}`，浏览器 POST SDP，走 ICE-lite、DTLS、SRTP，视频是 H264
 
-当前 SMS 已经完成的是国标 RTP（UDP、TCP 被动、TCP 主动）收包、PS 解复用、H264 FLV 输出。HLS 播放列表、RTSP、RTMP、WebRTC 的 URL 和端口在接口里，分发实现还在继续补。
+TCP 主动在设备 200 OK 之后由流媒体连到设备的收流地址。级联把收到的 RTP 原包转到上级 SDP 里的地址；上级 TCP 且 `a=setup:active` 时，应答端口改成流媒体新开的监听端口。WebRTC 的 UDP 端口是 30250–30500，需要在设备能访问到的地址上放通。
 
 ## 镜像与部署
 
@@ -95,7 +97,13 @@ make prod-down
 | `internal/manscdp` | 2016/2022 MANSCDP XML、云台指令 |
 | `internal/httpapi` | 与前端对齐的 `/api/v1` |
 | `internal/store` | SQLite |
-| `sms/` | 流媒体服务 |
+| `sms/server` | 流媒体进程入口 |
+| `sms/src/Rtp` | 国标 RTP 收流、PS/TS 解复用、TCP 主动、级联转发 |
+| `sms/src/Http` | HTTP-FLV 和内部控制接口 |
+| `sms/src/Rtsp` | RTSP 分发 |
+| `sms/src/Rtmp` | RTMP 分发 |
+| `sms/src/Record` | HLS MPEG-TS 切片 |
+| `sms/webrtc` | WHEP、ICE、DTLS、SRTP |
 | `configs/` | 本机直接运行的配置 |
 | `web/` | 管理页源码，部署时打进 argusweb |
 | `docker/` | 信令、流媒体、前端镜像 |

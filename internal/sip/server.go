@@ -41,6 +41,7 @@ type inviteWait struct {
 type inviteAnswer struct {
 	code int
 	sdp  string
+	to   string
 	err  error
 }
 
@@ -193,7 +194,7 @@ func (s *Server) onResponse(m *Message) {
 	}
 	if m.StatusCode >= 200 {
 		select {
-		case w.ch <- inviteAnswer{code: m.StatusCode, sdp: string(m.Body)}:
+		case w.ch <- inviteAnswer{code: m.StatusCode, sdp: string(m.Body), to: m.Get("To")}:
 		default:
 		}
 	}
@@ -563,19 +564,19 @@ func (s *Server) Subscribe(deviceID, cmd string, expires int) error {
 }
 
 type PlayOpt struct {
-	DeviceID   string
-	ChannelID  string
-	Transport  string
-	Mode       string
-	Start      string
-	End        string
-	Download   bool
-	Speed      int
-	SSRC       string
-	Subject    string
-	StreamNum  int
-	RecvIP     string
-	RecvPort   int
+	DeviceID  string
+	ChannelID string
+	Transport string
+	Mode      string
+	Start     string
+	End       string
+	Download  bool
+	Speed     int
+	SSRC      string
+	Subject   string
+	StreamNum int
+	RecvIP    string
+	RecvPort  int
 }
 
 func (s *Server) Invite(opt PlayOpt) (callID string, answer string, err error) {
@@ -619,11 +620,11 @@ func (s *Server) Invite(opt PlayOpt) (callID string, answer string, err error) {
 		if ans.code >= 300 {
 			return callID, ans.sdp, fmt.Errorf("设备拒绝播放(%d)", ans.code)
 		}
-		s.ack(p, m, ans.sdp)
+		s.ack(p, m, ans.to)
 		if strings.EqualFold(opt.Transport, "TCP") && strings.EqualFold(opt.Mode, "active") {
 			rip, rport := parseSDPIPPort(ans.sdp)
 			if rip != "" && rport > 0 && s.media != nil {
-				_ = s.media.Relay(opt.SSRC, "TCP", "active", rip, rport, opt.SSRC)
+				_, _ = s.media.Relay(opt.SSRC, "TCP", "active", rip, rport, opt.SSRC, "recv")
 			}
 		}
 		return callID, ans.sdp, nil
@@ -632,11 +633,14 @@ func (s *Server) Invite(opt PlayOpt) (callID string, answer string, err error) {
 	}
 }
 
-func (s *Server) ack(p *peer, invite *Message, _ string) {
+func (s *Server) ack(p *peer, invite *Message, to string) {
 	m := &Message{Method: "ACK", URI: invite.URI, Header: map[string][]string{}}
 	m.Set("Via", fmt.Sprintf("SIP/2.0/%s %s:%d;rport;branch=%s", p.Transport, s.ip, s.cfg.SIPPort, branch()))
 	m.Set("From", invite.Get("From"))
-	m.Set("To", invite.Get("To"))
+	if to == "" {
+		to = invite.Get("To")
+	}
+	m.Set("To", to)
 	m.Set("Call-ID", invite.Get("Call-ID"))
 	m.Set("CSeq", strings.Replace(invite.Get("CSeq"), "INVITE", "ACK", 1))
 	m.Set("Max-Forwards", "70")

@@ -208,10 +208,19 @@ func (s *Server) onCascadeInvite(m *Message, transport string, udp *net.UDPAddr,
 	if strings.Contains(string(m.Body), "TCP/RTP") {
 		tr = "TCP"
 	}
-	if uip != "" && uport > 0 {
-		_ = s.media.Relay(ssrc, tr, setup, uip, uport, ssrc)
+	sdpPort := opened.Port
+	sdpMode := "active"
+	relayMode := "passive"
+	if setup == "active" {
+		sdpMode = "passive"
+		relayMode = "active"
 	}
-	sdp := buildSDP(orSerial(c), opened.PublicIP, opened.Port, tr, "passive", ssrc, "", "", false)
+	if uip != "" && uport > 0 {
+		if p, err := s.media.Relay(ssrc, tr, relayMode, uip, uport, ssrc, "send"); err == nil && p > 0 {
+			sdpPort = p
+		}
+	}
+	sdp := buildSDP(orSerial(c), opened.PublicIP, sdpPort, tr, sdpMode, ssrc, "", "", false)
 	sdp = strings.Replace(sdp, "a=recvonly", "a=sendonly", 1)
 	resp := s.baseResp(m, 200, "OK")
 	resp.Set("Content-Type", "Application/SDP")

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 FROM debian:bookworm-slim AS builder
-RUN apt-get update && apt-get install -y --no-install-recommends g++ make ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends g++ make ca-certificates libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY sms ./sms
@@ -10,13 +10,13 @@ RUN mkdir -p /out \
     && cp sms/argussms /out/argussms
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget libssl3 \
     && rm -rf /var/lib/apt/lists/*
 ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=builder /out/argussms /app/argussms
 COPY deploy/configs/argussms.ini /config/argussms.ini
 VOLUME ["/data"]
-EXPOSE 10001
+EXPOSE 10001 554 1935
 ENTRYPOINT ["/app/argussms"]
 CMD ["-config", "/config/argussms.ini"]
