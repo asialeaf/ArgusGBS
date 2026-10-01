@@ -35,8 +35,19 @@ func TestDecodeCatalog2022(t *testing.T) {
 }
 
 func TestPTZStop(t *testing.T) {
-	s := PTZCmd("stop", 0)
-	if len(s) != 16 {
+	if s := PTZCmd("stop", 0); s != "A50F0100000000B5" {
+		t.Fatal(s)
+	}
+	if s := PTZCmd("left", 129); s != "A50F010281000038" {
+		t.Fatal(s)
+	}
+	if s := PTZCmd("right", 129); s != "A50F010181000037" {
+		t.Fatal(s)
+	}
+	if s := PTZCmd("up", 129); s != "A50F01080081003E" {
+		t.Fatal(s)
+	}
+	if s := PTZCmd("down", 129); s != "A50F01040081003A" {
 		t.Fatal(s)
 	}
 }

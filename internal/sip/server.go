@@ -2,6 +2,7 @@ package sip
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"log"
 	"net"
@@ -45,6 +46,13 @@ type inviteAnswer struct {
 	err  error
 }
 
+type callDialog struct {
+	deviceID string
+	from     string
+	to       string
+	uri      string
+}
+
 type Server struct {
 	cfg   *config.Config
 	db    *store.Store
@@ -59,6 +67,7 @@ type Server struct {
 	nonces  map[string]time.Time
 	waits   map[string]*waitXML
 	invites map[string]*inviteWait
+	dialogs map[string]*callDialog
 	catalog map[string]*catalogBuf
 	sn      atomic.Int64
 	cseq    atomic.Int64
@@ -81,6 +90,7 @@ func New(cfg *config.Config, db *store.Store, mediaClient *media.Client) *Server
 		cfg: cfg, db: db, media: mediaClient, ip: ip,
 		peers: map[string]*peer{}, nonces: map[string]time.Time{},
 		waits: map[string]*waitXML{}, invites: map[string]*inviteWait{},
+		dialogs: map[string]*callDialog{},
 		catalog: map[string]*catalogBuf{},
 		stop:    make(chan struct{}),
 	}
@@ -271,7 +281,6 @@ func (s *Server) onRegister(m *Message, transport string, udp *net.UDPAddr, tcp 
 	resp := s.baseResp(m, 200, "OK")
 	resp.Set("Expires", strconv.Itoa(expires))
 	resp.Set("Date", sipNow())
-	resp.Set("Contact", fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.Serial, s.ip, s.cfg.SIPPort))
 	s.send(resp, transport, udp, tcp)
 	go func() {
 		time.Sleep(300 * time.Millisecond)
@@ -394,7 +403,7 @@ func (s *Server) reply(req *Message, code int, reason string, body []byte, trans
 
 func (s *Server) baseResp(req *Message, code int, reason string) *Message {
 	resp := &Message{Response: true, StatusCode: code, Reason: reason, Header: map[string][]string{}}
-	resp.Set("Via", req.Get("Via"))
+	resp.Set("Via", viaWithSource(req.Get("Via"), req.addr))
 	from := req.Get("From")
 	to := req.Get("To")
 	if tagOf(to) == "" {
@@ -405,6 +414,9 @@ func (s *Server) baseResp(req *Message, code int, reason string) *Message {
 	resp.Set("Call-ID", req.Get("Call-ID"))
 	resp.Set("CSeq", req.Get("CSeq"))
 	resp.Set("User-Agent", "ArgusGBS")
+	if c := req.Get("Contact"); c != "" {
+		resp.Set("Contact", c)
+	}
 	return resp
 }
 
@@ -448,20 +460,18 @@ func (s *Server) request(method, deviceID, uri string, body []byte, contentType 
 	if p == nil {
 		return nil, fmt.Errorf("设备离线")
 	}
-	ip, port := "", s.cfg.SIPPort
-	if p.UDP != nil {
-		ip = p.UDP.IP.String()
-		port = p.UDP.Port
-	} else if p.TCP != nil {
-		ip, port = splitHostPort(p.TCP.RemoteAddr().String())
+	target := deviceID
+	if uri != "" && !strings.HasPrefix(uri, "sip:") {
+		target = uri
+		uri = ""
 	}
 	if uri == "" {
-		uri = fmt.Sprintf("sip:%s@%s:%d", deviceID, ip, port)
+		uri = fmt.Sprintf("sip:%s@%s", target, s.cfg.Realm)
 	}
 	m := &Message{Method: method, URI: uri, Header: map[string][]string{}}
 	m.Set("Via", fmt.Sprintf("SIP/2.0/%s %s:%d;rport;branch=%s", p.Transport, s.ip, s.cfg.SIPPort, branch()))
 	m.Set("From", fmt.Sprintf("<sip:%s@%s>;tag=%s", s.cfg.Serial, s.cfg.Realm, newTag()))
-	m.Set("To", fmt.Sprintf("<sip:%s@%s>", deviceID, ip))
+	m.Set("To", fmt.Sprintf("<sip:%s@%s>", target, s.cfg.Realm))
 	m.Set("Call-ID", newCallID())
 	m.Set("CSeq", fmt.Sprintf("%d %s", s.cseq.Add(1), method))
 	m.Set("Max-Forwards", "70")
@@ -517,7 +527,17 @@ func (s *Server) Control(deviceID, channelID string, fields [][2]string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.request("MESSAGE", deviceID, "", body, "Application/MANSCDP+xml")
+	for _, f := range fields {
+		if f[0] == "PTZCmd" {
+			body = withControlPriority(body, 5)
+			break
+		}
+	}
+	target := channelID
+	if target == "" {
+		target = deviceID
+	}
+	_, err = s.request("MESSAGE", deviceID, target, body, "Application/MANSCDP+xml")
 	return err
 }
 
@@ -544,20 +564,16 @@ func (s *Server) Subscribe(deviceID, cmd string, expires int) error {
 	if p == nil {
 		return fmt.Errorf("设备离线")
 	}
-	ip := ""
-	port := 0
-	if p.UDP != nil {
-		ip, port = p.UDP.IP.String(), p.UDP.Port
-	}
-	m := &Message{Method: "SUBSCRIBE", URI: fmt.Sprintf("sip:%s@%s:%d", deviceID, ip, port), Header: map[string][]string{}}
+	m := &Message{Method: "SUBSCRIBE", URI: fmt.Sprintf("sip:%s@%s", deviceID, s.cfg.Realm), Header: map[string][]string{}}
 	m.Set("Via", fmt.Sprintf("SIP/2.0/%s %s:%d;rport;branch=%s", p.Transport, s.ip, s.cfg.SIPPort, branch()))
 	m.Set("From", fmt.Sprintf("<sip:%s@%s>;tag=%s", s.cfg.Serial, s.cfg.Realm, newTag()))
-	m.Set("To", fmt.Sprintf("<sip:%s@%s>", deviceID, ip))
+	m.Set("To", fmt.Sprintf("<sip:%s@%s>", deviceID, s.cfg.Realm))
 	m.Set("Call-ID", newCallID())
 	m.Set("CSeq", fmt.Sprintf("%d SUBSCRIBE", s.cseq.Add(1)))
 	m.Set("Event", "presence")
 	m.Set("Expires", strconv.Itoa(expires))
 	m.Set("Contact", fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.Serial, s.ip, s.cfg.SIPPort))
+	m.Set("User-Agent", "ArgusGBS")
 	m.Body = body
 	m.Set("Content-Type", "Application/MANSCDP+xml")
 	return s.sendTo(deviceID, m)
@@ -586,18 +602,12 @@ func (s *Server) Invite(opt PlayOpt) (callID string, answer string, err error) {
 	if p == nil {
 		return "", "", fmt.Errorf("设备离线")
 	}
-	ip, port := "", 0
-	if p.UDP != nil {
-		ip, port = p.UDP.IP.String(), p.UDP.Port
-	} else if p.TCP != nil {
-		ip, port = splitHostPort(p.TCP.RemoteAddr().String())
-	}
-	sdp := buildSDP(s.cfg.Serial, opt.RecvIP, opt.RecvPort, opt.Transport, opt.Mode, opt.SSRC, opt.Start, opt.End, opt.Download)
-	uri := fmt.Sprintf("sip:%s@%s:%d", opt.ChannelID, ip, port)
+	sdp := buildSDP(opt.ChannelID, opt.RecvIP, opt.RecvPort, opt.Transport, opt.Mode, opt.SSRC, opt.Start, opt.End, opt.Download)
+	uri := fmt.Sprintf("sip:%s@%s", opt.ChannelID, s.cfg.Realm)
 	m := &Message{Method: "INVITE", URI: uri, Header: map[string][]string{}}
 	m.Set("Via", fmt.Sprintf("SIP/2.0/%s %s:%d;rport;branch=%s", p.Transport, s.ip, s.cfg.SIPPort, branch()))
 	m.Set("From", fmt.Sprintf("<sip:%s@%s>;tag=%s", s.cfg.Serial, s.cfg.Realm, newTag()))
-	m.Set("To", fmt.Sprintf("<sip:%s@%s>", opt.ChannelID, ip))
+	m.Set("To", fmt.Sprintf("<sip:%s@%s>", opt.ChannelID, s.cfg.Realm))
 	callID = newCallID()
 	m.Set("Call-ID", callID)
 	m.Set("CSeq", fmt.Sprintf("%d INVITE", s.cseq.Add(1)))
@@ -605,11 +615,17 @@ func (s *Server) Invite(opt PlayOpt) (callID string, answer string, err error) {
 	m.Set("Subject", fmt.Sprintf("%s:%s,%s:0", opt.ChannelID, opt.SSRC, s.cfg.Serial))
 	m.Set("Content-Type", "Application/SDP")
 	m.Set("Max-Forwards", "70")
+	m.Set("User-Agent", "ArgusGBS")
 	m.Body = []byte(sdp)
 	w := &inviteWait{ch: make(chan inviteAnswer, 1)}
 	s.mu.Lock()
 	s.invites[callID] = w
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.invites, callID)
+		s.mu.Unlock()
+	}()
 	if err = s.sendTo(opt.DeviceID, m); err != nil {
 		return "", "", err
 	}
@@ -620,7 +636,14 @@ func (s *Server) Invite(opt PlayOpt) (callID string, answer string, err error) {
 		if ans.code >= 300 {
 			return callID, ans.sdp, fmt.Errorf("设备拒绝播放(%d)", ans.code)
 		}
-		s.ack(p, m, ans.to)
+		to := ans.to
+		if to == "" {
+			to = m.Get("To")
+		}
+		s.mu.Lock()
+		s.dialogs[callID] = &callDialog{deviceID: opt.DeviceID, from: m.Get("From"), to: to, uri: uri}
+		s.mu.Unlock()
+		s.ack(p, m, to)
 		if strings.EqualFold(opt.Transport, "TCP") && strings.EqualFold(opt.Mode, "active") {
 			rip, rport := parseSDPIPPort(ans.sdp)
 			if rip != "" && rport > 0 && s.media != nil {
@@ -643,50 +666,80 @@ func (s *Server) ack(p *peer, invite *Message, to string) {
 	m.Set("To", to)
 	m.Set("Call-ID", invite.Get("Call-ID"))
 	m.Set("CSeq", strings.Replace(invite.Get("CSeq"), "INVITE", "ACK", 1))
+	m.Set("Contact", fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.Serial, s.ip, s.cfg.SIPPort))
 	m.Set("Max-Forwards", "70")
+	m.Set("User-Agent", "ArgusGBS")
 	_ = s.sendTo(p.ID, m)
 }
 
 func (s *Server) Bye(deviceID, channelID, callID string) {
 	s.mu.Lock()
 	p := s.peers[deviceID]
+	d := s.dialogs[callID]
+	delete(s.dialogs, callID)
 	delete(s.invites, callID)
 	s.mu.Unlock()
 	if p == nil {
 		return
 	}
-	ip := ""
-	if p.UDP != nil {
-		ip = p.UDP.IP.String()
+	uri := fmt.Sprintf("sip:%s@%s", channelID, s.cfg.Realm)
+	from := fmt.Sprintf("<sip:%s@%s>;tag=%s", s.cfg.Serial, s.cfg.Realm, newTag())
+	to := fmt.Sprintf("<sip:%s@%s>", channelID, s.cfg.Realm)
+	if d != nil {
+		if d.uri != "" {
+			uri = d.uri
+		}
+		if d.from != "" {
+			from = d.from
+		}
+		if d.to != "" {
+			to = d.to
+		}
 	}
-	m := &Message{Method: "BYE", URI: fmt.Sprintf("sip:%s@%s", channelID, ip), Header: map[string][]string{}}
+	m := &Message{Method: "BYE", URI: uri, Header: map[string][]string{}}
 	m.Set("Via", fmt.Sprintf("SIP/2.0/%s %s:%d;rport;branch=%s", p.Transport, s.ip, s.cfg.SIPPort, branch()))
-	m.Set("From", fmt.Sprintf("<sip:%s@%s>;tag=%s", s.cfg.Serial, s.cfg.Realm, newTag()))
-	m.Set("To", fmt.Sprintf("<sip:%s@%s>", channelID, ip))
+	m.Set("From", from)
+	m.Set("To", to)
 	m.Set("Call-ID", callID)
 	m.Set("CSeq", fmt.Sprintf("%d BYE", s.cseq.Add(1)))
+	m.Set("Contact", fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.Serial, s.ip, s.cfg.SIPPort))
 	m.Set("Max-Forwards", "70")
+	m.Set("User-Agent", "ArgusGBS")
 	_ = s.sendTo(deviceID, m)
+	go func() { _ = s.QueryCatalog(deviceID) }()
 }
 
 func (s *Server) Info(deviceID, channelID, callID, body string) error {
 	s.mu.Lock()
 	p := s.peers[deviceID]
+	d := s.dialogs[callID]
 	s.mu.Unlock()
 	if p == nil {
 		return fmt.Errorf("设备离线")
 	}
-	ip := ""
-	if p.UDP != nil {
-		ip = p.UDP.IP.String()
+	uri := fmt.Sprintf("sip:%s@%s", channelID, s.cfg.Realm)
+	from := fmt.Sprintf("<sip:%s@%s>;tag=%s", s.cfg.Serial, s.cfg.Realm, newTag())
+	to := fmt.Sprintf("<sip:%s@%s>", channelID, s.cfg.Realm)
+	if d != nil {
+		if d.uri != "" {
+			uri = d.uri
+		}
+		if d.from != "" {
+			from = d.from
+		}
+		if d.to != "" {
+			to = d.to
+		}
 	}
-	m := &Message{Method: "INFO", URI: fmt.Sprintf("sip:%s@%s", channelID, ip), Header: map[string][]string{}}
+	m := &Message{Method: "INFO", URI: uri, Header: map[string][]string{}}
 	m.Set("Via", fmt.Sprintf("SIP/2.0/%s %s:%d;rport;branch=%s", p.Transport, s.ip, s.cfg.SIPPort, branch()))
-	m.Set("From", fmt.Sprintf("<sip:%s@%s>;tag=%s", s.cfg.Serial, s.cfg.Realm, newTag()))
-	m.Set("To", fmt.Sprintf("<sip:%s@%s>", channelID, ip))
+	m.Set("From", from)
+	m.Set("To", to)
 	m.Set("Call-ID", callID)
 	m.Set("CSeq", fmt.Sprintf("%d INFO", s.cseq.Add(1)))
+	m.Set("Contact", fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.Serial, s.ip, s.cfg.SIPPort))
 	m.Set("Content-Type", "Application/MANSRTSP")
+	m.Set("User-Agent", "ArgusGBS")
 	m.Body = []byte(body)
 	return s.sendTo(deviceID, m)
 }
@@ -714,8 +767,14 @@ func buildSDP(serial, ip string, port int, transport, mode, ssrc, start, end str
 		te, _ := time.ParseInLocation("2006-01-02T15:04:05", end, time.Local)
 		t = fmt.Sprintf("%d %d", ts.Unix(), te.Unix())
 	}
-	return fmt.Sprintf("v=0\r\no=%s 0 0 IN IP4 %s\r\ns=%s\r\nc=IN IP4 %s\r\nt=%s\r\nm=video %d %s 96\r\na=recvonly\r\na=rtpmap:96 PS/90000\r\n%s",
-		serial, ip, name, ip, t, port, media, setup) + fmt.Sprintf("y=%s\r\n", ssrc)
+	payloads := "96"
+	maps := "a=rtpmap:96 PS/90000\r\n"
+	if !strings.EqualFold(transport, "TCP") {
+		payloads = "96 97 98"
+		maps += "a=rtpmap:97 MPEG4/90000\r\na=rtpmap:98 H264/90000\r\n"
+	}
+	return fmt.Sprintf("v=0\r\no=%s 0 0 IN IP4 %s\r\ns=%s\r\nc=IN IP4 %s\r\nt=%s\r\nm=video %d %s %s\r\na=recvonly\r\n%s%s",
+		serial, ip, name, ip, t, port, media, payloads, maps, setup) + fmt.Sprintf("y=%s\r\n", ssrc)
 }
 
 func parseSDPIPPort(sdp string) (string, int) {
@@ -755,6 +814,46 @@ func (s *Server) keepaliveLoop() {
 			s.mu.Unlock()
 		}
 	}
+}
+
+func viaWithSource(via string, addr net.Addr) string {
+	if via == "" || addr == nil {
+		return via
+	}
+	ip, port := splitAddr(addr)
+	if ip == "" {
+		return via
+	}
+	parts := strings.Split(via, ";")
+	out := make([]string, 0, len(parts)+1)
+	out = append(out, parts[0])
+	wrote := false
+	for _, p := range parts[1:] {
+		pl := strings.ToLower(strings.TrimSpace(p))
+		if pl == "rport" || strings.HasPrefix(pl, "rport=") || strings.HasPrefix(pl, "received=") {
+			if !wrote {
+				out = append(out, fmt.Sprintf("rport=%d", port), "received="+ip)
+				wrote = true
+			}
+			continue
+		}
+		out = append(out, strings.TrimSpace(p))
+	}
+	return strings.Join(out, ";")
+}
+
+func withControlPriority(body []byte, pri int) []byte {
+	info := []byte(fmt.Sprintf("<Info>\r\n<ControlPriority>%d</ControlPriority>\r\n</Info>\r\n", pri))
+	end := []byte("</Control>")
+	i := bytes.LastIndex(body, end)
+	if i < 0 {
+		return body
+	}
+	out := make([]byte, 0, len(body)+len(info))
+	out = append(out, body[:i]...)
+	out = append(out, info...)
+	out = append(out, body[i:]...)
+	return out
 }
 
 func splitAddr(a net.Addr) (string, int) {

@@ -227,18 +227,18 @@ type digestChallenge struct {
 }
 
 func (c digestChallenge) Header() string {
-	return fmt.Sprintf(`Digest realm="%s",nonce="%s",algorithm=MD5`, c.Realm, c.Nonce)
+	return fmt.Sprintf(`Digest realm="%s",qop="auth",nonce="%s"`, c.Realm, c.Nonce)
 }
 
 type digestAuth struct {
-	Username string
-	Realm    string
-	Nonce    string
-	URI      string
-	Response string
-	QOP      string
-	NC       string
-	CNonce   string
+	Username  string
+	Realm     string
+	Nonce     string
+	URI       string
+	Response  string
+	QOP       string
+	NC        string
+	CNonce    string
 	Algorithm string
 }
 
@@ -363,7 +363,7 @@ func tagOf(h string) string {
 }
 
 func sipNow() string {
-	return time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT")
+	return time.Now().Format("2006-01-02T15:04:05.000")
 }
 
 func branch() string { return "z9hG4bK" + randHex(8) }
