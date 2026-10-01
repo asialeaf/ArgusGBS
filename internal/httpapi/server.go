@@ -41,6 +41,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/modifypassword", a.auth(a.modifyPassword))
 	mux.HandleFunc("POST /api/v1/restart", a.auth(a.restart))
 	mux.HandleFunc("GET /api/v1/getbaseconfig", a.auth(a.getBaseConfig))
+	mux.HandleFunc("GET /api/v1/gm/cert/list", a.auth(a.gmCertList))
 	mux.HandleFunc("POST /api/v1/setbaseconfig", a.auth(a.setBaseConfig))
 	mux.HandleFunc("GET /api/v1/getpwdconfig", a.auth(a.getPwdConfig))
 	mux.HandleFunc("POST /api/v1/setpwdconfig", a.auth(a.setPwdConfig))
@@ -307,17 +308,21 @@ func (a *API) getBaseConfig(w http.ResponseWriter, r *http.Request) {
 		"KeepaliveTimeout": a.Cfg.KeepaliveTimeout, "APIAuth": a.Cfg.APIAuth,
 		"LiveStreamAuth": a.Cfg.LiveStreamAuth, "SIPLog": a.Cfg.SIPLog,
 		"AllowStreamStartByURL": a.Cfg.AllowStreamStartByURL,
-		"DevicePassword": a.Cfg.DevicePassword, "DropChannelType": a.Cfg.DropChannelType,
+		"DevicePassword":        a.Cfg.DevicePassword, "DropChannelType": a.Cfg.DropChannelType,
 		"MediaTransport": a.Cfg.DefaultMediaTransport, "MediaTransportMode": a.Cfg.DefaultMediaTransportMode,
 		"HTTPSPort": a.Cfg.HTTPSPort, "HTTPSCertFile": a.Cfg.HTTPSCert, "HTTPSKeyFile": a.Cfg.HTTPSKey,
 		"MapEnable": a.Cfg.MapEnable, "MapCenter": a.Cfg.MapCenter,
 		"GlobalChannelAudio": a.Cfg.GlobalChannelAudio, "GlobalChannelShared": a.Cfg.GlobalChannelShared,
-		"GlobalDeviceCatalogSubscribeInterval": a.Cfg.CatalogSubscribeInterval,
-		"GlobalDeviceAlarmSubscribeInterval": a.Cfg.AlarmSubscribeInterval,
+		"GlobalDeviceCatalogSubscribeInterval":  a.Cfg.CatalogSubscribeInterval,
+		"GlobalDeviceAlarmSubscribeInterval":    a.Cfg.AlarmSubscribeInterval,
 		"GlobalDevicePositionSubscribeInterval": a.Cfg.PositionSubscribeInterval,
-		"GlobalDevicePTZSubscribeInterval": a.Cfg.PTZSubscribeInterval,
-		"GM": false,
+		"GlobalDevicePTZSubscribeInterval":      a.Cfg.PTZSubscribeInterval,
+		"GM":                                    false,
 	})
+}
+
+func (a *API) gmCertList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"CertList": []any{}})
 }
 
 func (a *API) setBaseConfig(w http.ResponseWriter, r *http.Request) {
@@ -795,11 +800,11 @@ func (a *API) buildStream(r *http.Request, ssrc string, dev *model.Device, ch *m
 		Playback: playback, StartTime: start, EndTime: end, AudioEnable: ch.AudioEnable,
 		Ondemand: ch.Ondemand, CloudRecord: ch.CloudRecord, ChannelPTZType: ch.PTZType,
 		FLV: base + "/live/" + ssrc + ".flv", WSFLV: ws + "/live/" + ssrc + ".flv",
-		HLS:    base + "/live/" + ssrc + "/index.m3u8",
-		RTMP:   fmt.Sprintf("rtmp://%s:%d/live/%s", host, a.Cfg.SMSRTMPPort, ssrc),
-		RTSP:   fmt.Sprintf("rtsp://%s:%d/live/%s", host, a.Cfg.SMSRTSPPort, ssrc),
-		WEBRTC: base + "/webrtc/play?stream=" + ssrc,
-		WHEP:   base + "/whep/" + ssrc,
+		HLS:     base + "/live/" + ssrc + "/index.m3u8",
+		RTMP:    fmt.Sprintf("rtmp://%s:%d/live/%s", host, a.Cfg.SMSRTMPPort, ssrc),
+		RTSP:    fmt.Sprintf("rtsp://%s:%d/live/%s", host, a.Cfg.SMSRTSPPort, ssrc),
+		WEBRTC:  base + "/webrtc/play?stream=" + ssrc,
+		WHEP:    base + "/whep/" + ssrc,
 		SnapURL: ch.SnapURL,
 	}
 }

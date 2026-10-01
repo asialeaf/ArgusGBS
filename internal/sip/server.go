@@ -113,6 +113,7 @@ func (s *Server) Start() error {
 		s.udp.Close()
 		return err
 	}
+	s.restorePeers()
 	go s.readUDP()
 	go s.acceptTCP()
 	go s.keepaliveLoop()
@@ -164,11 +165,7 @@ func (s *Server) serveTCP(c net.Conn) {
 
 func (s *Server) dispatch(m *Message, transport string, udp *net.UDPAddr, tcp net.Conn) {
 	if s.cfg.SIPLog {
-		if m.Response {
-			log.Printf("SIP <- %d %s %s", m.StatusCode, m.CSeq(), m.CallID())
-		} else {
-			log.Printf("SIP <- %s %s", m.Method, m.URI)
-		}
+		log.Printf("SIP <-\n%s", m.Bytes())
 	}
 	if m.Response {
 		s.onResponse(m)
@@ -264,16 +261,21 @@ func (s *Server) onRegister(m *Message, transport string, udp *net.UDPAddr, tcp 
 		s.reply(m, 200, "OK", nil, transport, udp, tcp)
 		return
 	}
-	gb := "2016"
+	// 厂家列对应 REGISTER 的 User-Agent。报文没有版本字段时不写 GBVer，避免列表拼出「-, GB2016」。
+	gb := ""
 	if strings.Contains(ua, "2022") || strings.Contains(strings.ToLower(ua), "gb28181-2022") {
 		gb = "2022"
 	}
-	p := &peer{ID: id, Transport: transport, UDP: udp, TCP: tcp, FromTag: tagOf(m.Get("From")), GBVer: gb, Charset: s.cfg.Charset, UA: ua, To: m.Get("To")}
+	peerGB := gb
+	if peerGB == "" {
+		peerGB = "2016"
+	}
+	p := &peer{ID: id, Transport: transport, UDP: udp, TCP: tcp, FromTag: tagOf(m.Get("From")), GBVer: peerGB, Charset: s.cfg.Charset, UA: ua, To: m.Get("To")}
 	s.mu.Lock()
 	s.peers[id] = p
 	s.mu.Unlock()
 	_ = s.db.UpsertDeviceFromRegister(&model.Device{
-		ID: id, Name: id, GBVer: gb, CommandTransport: transport, RemoteIP: ip, RemotePort: port,
+		ID: id, Name: id, Manufacturer: strings.TrimSpace(ua), GBVer: gb, CommandTransport: transport, RemoteIP: ip, RemotePort: port,
 		ContactIP: ip, UA: ua, Charset: s.cfg.Charset,
 		MediaTransport: s.cfg.DefaultMediaTransport, MediaTransportMode: s.cfg.DefaultMediaTransportMode,
 		Password: "",
@@ -309,11 +311,7 @@ func (s *Server) onMessage(m *Message, transport string, udp *net.UDPAddr, tcp n
 	switch env.CmdType {
 	case "Keepalive":
 		s.db.TouchKeepalive(from)
-		s.mu.Lock()
-		if p := s.peers[from]; p != nil {
-			p.UDP, p.TCP, p.Transport = udp, tcp, transport
-		}
-		s.mu.Unlock()
+		s.rememberPeer(from, m, transport, udp, tcp)
 	case "Catalog":
 		s.absorbCatalog(from, env)
 	case "Alarm":
@@ -423,11 +421,7 @@ func (s *Server) baseResp(req *Message, code int, reason string) *Message {
 func (s *Server) send(m *Message, transport string, udp *net.UDPAddr, tcp net.Conn) {
 	b := m.Bytes()
 	if s.cfg.SIPLog {
-		if m.Response {
-			log.Printf("SIP -> %d %s", m.StatusCode, m.CSeq())
-		} else {
-			log.Printf("SIP -> %s %s", m.Method, m.URI)
-		}
+		log.Printf("SIP ->\n%s", b)
 	}
 	if transport == "TCP" && tcp != nil {
 		_, _ = tcp.Write(b)
@@ -436,6 +430,82 @@ func (s *Server) send(m *Message, transport string, udp *net.UDPAddr, tcp net.Co
 	if udp != nil && s.udp != nil {
 		_, _ = s.udp.WriteToUDP(b, udp)
 	}
+}
+
+func (s *Server) restorePeers() {
+	list, _, err := s.db.ListDevices("", "", "true", "", "", 0, 1000)
+	if err != nil {
+		return
+	}
+	n := 0
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, d := range list {
+		if d.RemoteIP == "" || d.RemotePort == 0 {
+			continue
+		}
+		addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", d.RemoteIP, d.RemotePort))
+		if err != nil {
+			continue
+		}
+		gb := d.GBVer
+		if gb == "" {
+			gb = "2016"
+		}
+		charset := d.Charset
+		if charset == "" {
+			charset = s.cfg.Charset
+		}
+		s.peers[d.ID] = &peer{
+			ID: d.ID, Transport: orTransport(d.CommandTransport), UDP: addr,
+			GBVer: gb, Charset: charset, UA: d.UA,
+		}
+		n++
+	}
+	if n > 0 {
+		log.Printf("从数据库恢复 %d 路在线设备会话", n)
+	}
+}
+
+func orTransport(t string) string {
+	if t == "" {
+		return "UDP"
+	}
+	return t
+}
+
+func (s *Server) rememberPeer(id string, m *Message, transport string, udp *net.UDPAddr, tcp net.Conn) {
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	if p := s.peers[id]; p != nil {
+		p.UDP, p.TCP, p.Transport = udp, tcp, transport
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+	gb, charset, ua := "2016", s.cfg.Charset, ""
+	if dev, err := s.db.GetDevice(id); err == nil && dev != nil {
+		if dev.GBVer != "" {
+			gb = dev.GBVer
+		}
+		if dev.Charset != "" {
+			charset = dev.Charset
+		}
+		ua = dev.UA
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.peers[id]; p != nil {
+		p.UDP, p.TCP, p.Transport = udp, tcp, transport
+		return
+	}
+	s.peers[id] = &peer{
+		ID: id, Transport: transport, UDP: udp, TCP: tcp,
+		FromTag: tagOf(m.Get("From")), GBVer: gb, Charset: charset, UA: ua,
+	}
+	log.Printf("心跳恢复会话 %s %s", id, transport)
 }
 
 func (s *Server) sendTo(id string, m *Message) error {
@@ -773,8 +843,9 @@ func buildSDP(serial, ip string, port int, transport, mode, ssrc, start, end str
 		payloads = "96 97 98"
 		maps += "a=rtpmap:97 MPEG4/90000\r\na=rtpmap:98 H264/90000\r\n"
 	}
+	// GB/T 28181-2022 附录 G：视频参数留空表示不限制；音频 6 为 AAC，码率 8 为 64kbps，采样率 1 为 8kHz。
 	return fmt.Sprintf("v=0\r\no=%s 0 0 IN IP4 %s\r\ns=%s\r\nc=IN IP4 %s\r\nt=%s\r\nm=video %d %s %s\r\na=recvonly\r\n%s%s",
-		serial, ip, name, ip, t, port, media, payloads, maps, setup) + fmt.Sprintf("y=%s\r\n", ssrc)
+		serial, ip, name, ip, t, port, media, payloads, maps, setup) + fmt.Sprintf("y=%s\r\nf=v/////a/6/8/1\r\n", ssrc)
 }
 
 func parseSDPIPPort(sdp string) (string, int) {

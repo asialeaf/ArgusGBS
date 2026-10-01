@@ -10,12 +10,12 @@ COPY . ./
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/arguscms ./cmd/arguscms
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata wget
+RUN apk add --no-cache ca-certificates tzdata wget redis
 ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=builder /out/arguscms /app/arguscms
 COPY deploy/configs/arguscms.ini /config/arguscms.ini
 VOLUME ["/data"]
-EXPOSE 10000 15060/tcp 15060/udp
+EXPOSE 10002 15060/tcp 15060/udp 26380
 ENTRYPOINT ["/app/arguscms"]
 CMD ["-config", "/config/arguscms.ini"]

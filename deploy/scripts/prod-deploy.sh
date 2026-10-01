@@ -24,15 +24,13 @@ make pull-images
 docker compose -f docker-compose.yml -f docker-compose.acr.yml up -d --no-build --remove-orphans
 
 HOST="${ADVERTISE_IP:-localhost}"
-WEB_PORT="${WEB_PORT:-10000}"
-SMS_PORT="${SMS_HTTP_PORT:-10001}"
-SIP_PORT="${SIP_PORT:-15060}"
 echo ""
 echo "=== 部署完成 ==="
 make prod-ps
 echo ""
 echo "访问地址："
-echo "  管理页   http://${HOST}:${WEB_PORT}/   账号 admin / admin"
-echo "  信令 API http://${HOST}:${WEB_PORT}/api/v1/getserverinfo"
-echo "  流媒体   http://${HOST}:${SMS_PORT}/api/v1/serverinfo"
-echo "  设备 SIP ${HOST}:${SIP_PORT}  域 3402000000  密码见 configs/arguscms.ini"
+echo "  管理页   http://${HOST}:10000/   账号 admin / admin"
+echo "  信令 API http://${HOST}:10000/api/v1/getserverinfo  （进程端口 10002）"
+echo "  流媒体   http://${HOST}:10001/api/v1/serverinfo"
+echo "  设备 SIP ${HOST}:15060  域 3402000000  密码见 configs/arguscms.ini"
+echo "  Redis    ${HOST}:26380"

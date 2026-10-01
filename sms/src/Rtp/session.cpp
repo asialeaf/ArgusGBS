@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <chrono>
+#include <iostream>
 
 static int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -56,7 +57,9 @@ void Session::broadcast(const std::vector<uint8_t>& tag) {
         while (flv_tags.size() > 400) flv_tags.pop_front();
         for (auto& s : subs) {
             if (!s->sent_header || s->fd < 0) continue;
-            send(s->fd, tag.data(), tag.size(), MSG_NOSIGNAL);
+            std::vector<uint8_t> shifted = tag;
+            flv_shift_tags(shifted.data(), shifted.size(), s->stamp_base);
+            send(s->fd, shifted.data(), shifted.size(), MSG_NOSIGNAL);
         }
         int extra = 0;
         {
@@ -69,7 +72,7 @@ void Session::broadcast(const std::vector<uint8_t>& tag) {
 }
 
 std::vector<uint8_t> Session::flv_header_and_gop() {
-    std::vector<uint8_t> out = flv_file_header();
+    std::vector<uint8_t> out = flv_file_header(!aac_asc.empty());
     if (!vps.empty() && !sps.empty() && !pps.empty()) {
         auto seq = hevc_seq_header(vps, sps, pps);
         out.insert(out.end(), seq.begin(), seq.end());
@@ -77,15 +80,34 @@ std::vector<uint8_t> Session::flv_header_and_gop() {
         auto seq = avc_seq_header(sps, pps);
         out.insert(out.end(), seq.begin(), seq.end());
     }
+    if (!aac_asc.empty()) {
+        auto seq = aac_flv_tag(aac_asc.data(), aac_asc.size(), 0, true, aac_channels);
+        out.insert(out.end(), seq.begin(), seq.end());
+    }
     std::lock_guard<std::mutex> lk(mu);
-    for (auto& t : flv_tags) out.insert(out.end(), t.begin(), t.end());
+    size_t from = 0;
+    bool key = false;
+    for (size_t i = 0; i < flv_tags.size(); i++) {
+        auto& t = flv_tags[i];
+        if (t.size() >= 13 && t[0] == 9 && t[12] == 1 && (t[11] >> 4) == 1) {
+            from = i;
+            key = true;
+        }
+    }
+    for (size_t i = key ? from : 0; i < flv_tags.size(); i++) {
+        auto& t = flv_tags[i];
+        if (t.empty()) continue;
+        if (t[0] == 8) {
+            if (t.size() < 13 || (t[11] >> 4) != 10 || t[12] == 0) continue;
+        }
+        out.insert(out.end(), t.begin(), t.end());
+    }
     return out;
 }
 
 void Session::add_nals(const std::vector<NAL>& nals) {
-    uint32_t dts = (uint32_t)(stats.video_frames * 40);
     bool dummy = false;
-    bool sent_hevc = !vps.empty() && !sps.empty() && !pps.empty();
+    bool sent_hevc = (!vps.empty() && !sps.empty() && !pps.empty()) || (vps.empty() && !sps.empty() && !pps.empty());
     for (auto& n : nals) {
         auto raw = n.data;
         size_t off = 0;
@@ -106,6 +128,11 @@ void Session::add_nals(const std::vector<NAL>& nals) {
             broadcast(hevc_seq_header(vps, sps, pps));
             sent_hevc = true;
         }
+        if (!sent_hevc && vps.empty() && !sps.empty() && !pps.empty()) {
+            broadcast(avc_seq_header(sps, pps));
+            sent_hevc = true;
+        }
+        uint32_t dts = video_stamp.map(n.ts90);
         auto tag = annexb_to_flv_tag(n, dts, sps, pps, dummy);
         if (!tag.empty()) {
             stats.video_frames++;
@@ -120,9 +147,25 @@ void Session::add_nals(const std::vector<NAL>& nals) {
 
 static void pull_media(Session* s) {
     s->add_nals(s->demux.take());
+    uint32_t last_dts = 0;
+    bool have_dts = false;
     for (auto& a : s->demux.take_audio()) {
-        s->stats.audio_codec = a.alaw ? "G711A" : "G711U";
-        s->broadcast(g711_flv_tag(a.data.data(), a.data.size(), a.ts90 / 90, a.alaw));
+        if (!a.aac) {
+            s->stats.audio_codec = a.alaw ? "G711A" : "G711U";
+            continue;
+        }
+        s->stats.audio_codec = "AAC";
+        if (!a.asc.empty()) {
+            s->aac_asc = a.asc;
+            s->aac_channels = a.channels;
+            s->broadcast(aac_flv_tag(a.asc.data(), a.asc.size(), 0, true, a.channels));
+        }
+        uint32_t dts = s->video_stamp.map(a.ts90);
+        if (have_dts && dts <= last_dts) dts = last_dts + 128;
+        have_dts = true;
+        last_dts = dts;
+        auto tag = aac_flv_tag(a.data.data(), a.data.size(), dts, false, a.channels);
+        if (!tag.empty()) s->broadcast(tag);
     }
 }
 
@@ -348,7 +391,6 @@ static void decode_rtp(Session* s, const uint8_t* b, size_t n) {
     }
     if (pt == 0 || pt == 8) {
         s->stats.audio_codec = pt == 8 ? "G711A" : "G711U";
-        s->broadcast(g711_flv_tag(payload, plen, ts / 8, pt == 8));
         return;
     }
     if (!s->asm_has || ts != s->asm_stamp || s->asm_buf.size() > 256 * 1024) {
@@ -404,6 +446,7 @@ static void handle_rtp(Session* s, const uint8_t* b, size_t n) {
     s->forward_rtp(b, n);
     uint16_t seq = (b[2] << 8) | b[3];
     if (!s->has_seq) {
+        std::cerr << "RTP 首包 " << s->id << " " << n << " bytes" << std::endl;
         s->has_seq = true;
         s->last_seq = (uint16_t)(seq - 1);
     }
@@ -508,6 +551,7 @@ std::shared_ptr<Session> Hub::open(const std::string& id, const std::string& tra
         s->worker = std::thread(udp_loop, s);
     }
     sessions_[id] = s;
+    std::cerr << "RTP 监听 " << id << " " << transport << "/" << mode << " :" << port << std::endl;
     return s;
 }
 

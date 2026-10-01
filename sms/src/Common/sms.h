@@ -19,6 +19,9 @@ struct NAL {
 
 struct AudioFrame {
     bool alaw = true;
+    bool aac = false;
+    int channels = 1;
+    std::vector<uint8_t> asc; // 非空表示这帧带上新的 AudioSpecificConfig
     std::vector<uint8_t> data;
     uint32_t ts90 = 0;
 };
@@ -52,7 +55,13 @@ private:
     void parse_psm(const uint8_t* p, size_t n);
     void on_pes(uint8_t sid, const uint8_t* p, size_t n);
     void emit_nals(const uint8_t* es, size_t n, uint32_t pts, bool h265);
+    void emit_aac(const uint8_t* es, size_t n, uint32_t pts);
     std::vector<uint8_t> buf_;
+    std::vector<uint8_t> es_tail_;
+    uint32_t es_tail_pts_ = 0;
+    std::vector<uint8_t> aac_tail_;
+    uint32_t aac_tail_pts_ = 0;
+    std::vector<uint8_t> aac_asc_;
     std::vector<NAL> out_;
     std::vector<AudioFrame> audio_;
     std::map<uint8_t, std::string> sid_codec_;
@@ -61,10 +70,81 @@ private:
     uint32_t ts_ = 0;
 };
 
+// 直播时间戳：把绝对 PTS 收成从 0 递增，跳变超过 300ms 时沿用上一增量。
+// 与 ZLMediaKit Stamp / DeltaStamp 的直播策略一致。
+struct LiveStamp {
+    bool seen = false;
+    int64_t last_in = 0;
+    int64_t out = 0;
+    int64_t last_delta = 40;
+    uint32_t map(uint32_t pts90) {
+        int64_t in = (int64_t)pts90 / 90;
+        if (!seen) {
+            seen = true;
+            last_in = in;
+            out = 0;
+            return 0;
+        }
+        if (in == last_in) return (uint32_t)out;
+        int64_t d = in - last_in;
+        last_in = in;
+        if (d <= 0 || d > 300) d = last_delta;
+        else last_delta = d;
+        out += d;
+        if (out < 0) out = 0;
+        return (uint32_t)out;
+    }
+};
+
+inline uint32_t flv_tag_ts(const uint8_t* p) {
+    return ((uint32_t)p[4] << 16) | ((uint32_t)p[5] << 8) | p[6] | ((uint32_t)p[7] << 24);
+}
+
+inline void flv_set_ts(uint8_t* p, uint32_t ts) {
+    p[4] = (uint8_t)((ts >> 16) & 0xFF);
+    p[5] = (uint8_t)((ts >> 8) & 0xFF);
+    p[6] = (uint8_t)(ts & 0xFF);
+    p[7] = (uint8_t)((ts >> 24) & 0xFF);
+}
+
+inline bool flv_is_seq(const uint8_t* p, size_t n) {
+    if (n < 13) return false;
+    if (p[0] == 9 && p[12] == 0x00) return true;
+    if (p[0] == 8 && (p[11] >> 4) == 10 && p[12] == 0x00) return true;
+    return false;
+}
+
+inline int64_t flv_first_media_ts(const uint8_t* p, size_t n) {
+    size_t i = 0;
+    while (i + 11 <= n) {
+        uint32_t size = ((uint32_t)p[i + 1] << 16) | ((uint32_t)p[i + 2] << 8) | p[i + 3];
+        if (i + 11 + size + 4 > n) break;
+        if (!flv_is_seq(p + i, 11 + size)) return flv_tag_ts(p + i);
+        i += 11 + size + 4;
+    }
+    return 0;
+}
+
+inline void flv_shift_tags(uint8_t* p, size_t n, int64_t base) {
+    size_t i = 0;
+    while (i + 11 <= n) {
+        uint32_t size = ((uint32_t)p[i + 1] << 16) | ((uint32_t)p[i + 2] << 8) | p[i + 3];
+        if (i + 11 + size + 4 > n) break;
+        if (flv_is_seq(p + i, 11 + size)) flv_set_ts(p + i, 0);
+        else {
+            int64_t nts = (int64_t)flv_tag_ts(p + i) - base;
+            if (nts < 0) nts = 0;
+            flv_set_ts(p + i, (uint32_t)nts);
+        }
+        i += 11 + size + 4;
+    }
+}
+
 struct Subscriber {
     int fd = -1;
     bool websocket = false;
     bool sent_header = false;
+    int64_t stamp_base = 0;
 };
 
 struct RtpSink {
@@ -103,6 +183,9 @@ public:
     std::mutex mu;
     std::vector<NAL> gop;
     std::vector<uint8_t> sps, pps, vps;
+    std::vector<uint8_t> aac_asc;
+    int aac_channels = 1;
+    LiveStamp video_stamp, audio_stamp;
     std::deque<std::vector<uint8_t>> flv_tags;
     std::vector<std::shared_ptr<Subscriber>> subs;
     StreamStats stats;
@@ -188,8 +271,9 @@ void rtc_send(Session* s, const std::vector<NAL>& nals, uint32_t ts90);
 void rtc_stop(const std::shared_ptr<void>& player);
 
 std::vector<uint8_t> annexb_to_flv_tag(const NAL& nal, uint32_t& dts, const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps, bool& sent_seq);
-std::vector<uint8_t> flv_file_header();
+std::vector<uint8_t> flv_file_header(bool with_audio);
 std::vector<uint8_t> avc_seq_header(const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps);
 std::vector<uint8_t> hevc_seq_header(const std::vector<uint8_t>& vps, const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps);
 std::vector<uint8_t> g711_flv_tag(const uint8_t* data, size_t len, uint32_t dts_ms, bool alaw);
+std::vector<uint8_t> aac_flv_tag(const uint8_t* data, size_t len, uint32_t dts_ms, bool sequence, int channels);
 std::string json_escape(const std::string& s);

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 把 .env 里的对外地址写进 configs/*.ini。
-# 容器内监听端口保持 10000 / 10001 / 15060 / 30000-30249，宿主机映射由 compose 读 .env。
+# 宿主机网络，监听端口即对外端口：管理页 10000，信令 HTTP 10002，流媒体 HTTP 10001。
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="${DIR}/.env"
@@ -53,4 +53,4 @@ set_ini "$SMS" rtp advertise_ip "$HOST"
 echo "已同步配置:"
 echo "  configs/arguscms.ini  [sip] host=${HOST}"
 echo "  configs/argussms.ini  [rtp] advertise_ip=${HOST}"
-echo "  对外端口 WEB=${WEB_PORT:-10000} SMS=${SMS_HTTP_PORT:-10001} SIP=${SIP_PORT:-15060} RTP=${RTP_PORT_RANGE:-30000-30249}"
+echo "  端口 管理页=10000 信令HTTP=10002 流媒体HTTP=10001 SIP=15060 RTP=30000-30249"

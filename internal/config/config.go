@@ -56,6 +56,10 @@ type Config struct {
 	SMSPublicHost string
 	SMSAPISecret  string
 
+	RedisHost     string
+	RedisPort     int
+	RedisPassword string
+
 	// 运行期可被基础配置接口修改的订阅间隔（秒，0 表示关闭）
 	CatalogSubscribeInterval  int
 	AlarmSubscribeInterval    int
@@ -97,6 +101,9 @@ func Default() *Config {
 		SMSRTMPPort:               1935,
 		SMSRTSPPort:               554,
 		SMSAPISecret:              "argus-sms",
+		RedisHost:                 "127.0.0.1",
+		RedisPort:                 26380,
+		RedisPassword:             "argus@2024",
 		PwdLength:                 6,
 		PwdLevel:                  2,
 	}
@@ -222,6 +229,12 @@ func apply(c *Config, section, key, val string) {
 		c.SMSPublicHost = val
 	case "sms.api_secret":
 		c.SMSAPISecret = val
+	case "redis.host":
+		c.RedisHost = val
+	case "redis.port":
+		c.RedisPort = atoi(val, c.RedisPort)
+	case "redis.password":
+		c.RedisPassword = val
 	}
 }
 

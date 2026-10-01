@@ -101,10 +101,13 @@ static void serve_flv(int fd, std::shared_ptr<Session> s) {
         "Connection: keep-alive\r\n\r\n";
     send_all(fd, hdr);
     auto init = s->flv_header_and_gop();
+    int64_t base = init.size() > 13 ? flv_first_media_ts(init.data() + 13, init.size() - 13) : 0;
+    if (init.size() > 13) flv_shift_tags(init.data() + 13, init.size() - 13, base);
     send_all(fd, init.data(), init.size());
     auto sub = std::make_shared<Subscriber>();
     sub->fd = fd;
     sub->sent_header = true;
+    sub->stamp_base = base;
     {
         std::lock_guard<std::mutex> lk(s->mu);
         s->subs.push_back(sub);

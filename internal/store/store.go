@@ -530,7 +530,7 @@ func (s *Store) UpsertDeviceFromRegister(d *model.Device) error {
 	}
 	_, err := s.db.Exec(`UPDATE devices SET online=1, remote_ip=?, remote_port=?, contact_ip=?, contact_port=?, command_transport=?, last_register_at=?, last_keepalive_at=?, ua=?, updated_at=?,
 		manufacturer=CASE WHEN ?<>'' THEN ? ELSE manufacturer END,
-		gb_ver=CASE WHEN gb_ver='2016' AND ?='2022' THEN '2022' ELSE gb_ver END,
+		gb_ver=CASE WHEN ?='2022' OR gb_ver='2022' THEN '2022' ELSE '' END,
 		name=CASE WHEN name='' THEN ? ELSE name END
 		WHERE id=?`,
 		d.RemoteIP, d.RemotePort, d.ContactIP, d.RemotePort, or(d.CommandTransport, "UDP"), t, t, d.UA, t,

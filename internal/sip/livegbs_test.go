@@ -33,6 +33,7 @@ func TestPlaySDPMatchesLiveGBS(t *testing.T) {
 		"a=rtpmap:97 MPEG4/90000",
 		"a=rtpmap:98 H264/90000",
 		"y=0200000001",
+		"f=v/////a/6/8/1",
 	} {
 		if !strings.Contains(sdp, line) {
 			t.Fatalf("missing %s\n%s", line, sdp)

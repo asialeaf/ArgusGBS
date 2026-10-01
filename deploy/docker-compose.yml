@@ -1,10 +1,37 @@
-# 本地构建并启动前端、信令、流媒体
+# 本地构建并启动前端、信令、流媒体和 Redis。服务都走宿主机网络，端口即进程监听端口。
 # cd deploy && make up
 # ACR 镜像：make prod-deploy
+#
+# 端口：
+#   10000  管理页 argusweb
+#   10002  信令 HTTP arguscms（nginx 把 /api 转到这里）
+#   10001  流媒体 HTTP argussms
+#   15060  信令 SIP
+#   15070  流媒体 SIP
+#   26380  Redis
+#   554 / 1935  RTSP / RTMP
+#   30000-30249  RTP
+#   30250-30500  WebRTC
 
 name: argusgbs
 
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: argusredis
+    restart: unless-stopped
+    network_mode: host
+    command: ["redis-server", "/config/redis.conf"]
+    volumes:
+      - ./configs/redis.conf:/config/redis.conf:ro
+      - argus_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26380", "-a", "argus@2024", "--no-auth-warning", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 3s
+
   argussms:
     build:
       context: ..
@@ -12,19 +39,16 @@ services:
     image: argusgbs/argussms:local
     container_name: argussms
     restart: unless-stopped
+    network_mode: host
     environment:
       TZ: Asia/Shanghai
       ARGUS_ADVERTISE_IP: ${ADVERTISE_IP:-}
     volumes:
       - ./configs/argussms.ini:/config/argussms.ini:ro
       - argus_sms:/data
-    ports:
-      - "${SMS_HTTP_PORT:-10001}:10001"
-      - "${RTSP_PORT:-554}:554"
-      - "${RTMP_PORT:-1935}:1935"
-      - "${RTP_PORT_RANGE:-30000-30249}:30000-30249/udp"
-      - "${RTP_PORT_RANGE:-30000-30249}:30000-30249/tcp"
-      - "${WEBRTC_PORT_RANGE:-30250-30500}:30250-30500/udp"
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10001/api/v1/serverinfo"]
       interval: 10s
@@ -39,24 +63,21 @@ services:
     image: argusgbs/arguscms:local
     container_name: arguscms
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    network_mode: host
     depends_on:
+      redis:
+        condition: service_healthy
       argussms:
         condition: service_healthy
     environment:
       TZ: Asia/Shanghai
-      ARGUS_SMS_HOST: argussms
       ARGUS_SIP_HOST: ${ADVERTISE_IP:-}
       ARGUS_ADVERTISE_IP: ${ADVERTISE_IP:-}
     volumes:
       - ./configs/arguscms.ini:/config/arguscms.ini:ro
       - argus_cms:/data
-    ports:
-      - "${SIP_PORT:-15060}:15060/udp"
-      - "${SIP_PORT:-15060}:15060/tcp"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10000/api/v1/getserverinfo"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10002/api/v1/getserverinfo"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -69,11 +90,10 @@ services:
     image: argusgbs/argusweb:local
     container_name: argusweb
     restart: unless-stopped
+    network_mode: host
     depends_on:
       arguscms:
         condition: service_healthy
-    ports:
-      - "${WEB_PORT:-10000}:10000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10000/login.html"]
       interval: 10s
@@ -82,5 +102,6 @@ services:
       start_period: 20s
 
 volumes:
+  argus_redis:
   argus_cms:
   argus_sms:

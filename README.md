@@ -76,7 +76,7 @@ TCP 主动在设备 200 OK 之后由流媒体连到设备的收流地址。级�
 ```bash
 cd deploy
 cp .env.example .env
-# 填写 ADVERTISE_IP、WEB_PORT、ALIYUN_ACR_*、ACR_IMAGE_PREFIX
+# 填写 ADVERTISE_IP、ALIYUN_ACR_*、ACR_IMAGE_PREFIX
 make sync-configs   # 把 ADVERTISE_IP 写入 configs/*.ini
 make prod-deploy    # 检查 env → 同步配置 → 登录 ACR → 拉镜像 → 启动
 make prod-ps
@@ -86,7 +86,7 @@ make prod-down
 
 `make up` 不拉镜像，在本机编译后启动。`make up-images` 与 `make prod-deploy` 一样走 ACR 镜像。
 
-`ADVERTISE_IP` 会写进 SIP Contact 和收流 SDP。管理页是 `argusweb`，默认 `http://<ADVERTISE_IP>:10000/`，账号 `admin` / `admin`。信令 HTTP 只在容器网络里，浏览器通过前端的 `/api` 访问。
+`ADVERTISE_IP` 会写进 SIP Contact 和收流 SDP。Compose 使用宿主机网络。管理页是 `argusweb` 的 `http://<ADVERTISE_IP>:10000/`，账号 `admin` / `admin`，`/api` 转到信令 HTTP `10002`。流媒体 HTTP 是 `10001`。Redis 是独立服务，端口 `26380`。
 
 ## 目录
 
