@@ -59,7 +59,8 @@ void Session::broadcast(const std::vector<uint8_t>& tag) {
             if (!s->sent_header || s->fd < 0) continue;
             std::vector<uint8_t> shifted = tag;
             flv_shift_tags(shifted.data(), shifted.size(), s->stamp_base);
-            send(s->fd, shifted.data(), shifted.size(), MSG_NOSIGNAL);
+            if (s->websocket) ws_send(s->fd, shifted.data(), shifted.size());
+            else send(s->fd, shifted.data(), shifted.size(), MSG_NOSIGNAL);
         }
         int extra = 0;
         {

@@ -3,10 +3,12 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <openssl/sha.h>
 #include <sstream>
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
+#include <vector>
 
 std::string host_ip() {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -92,20 +94,98 @@ static void http_json(int fd, int code, const std::string& body) {
     send_all(fd, o.str());
 }
 
-static void serve_flv(int fd, std::shared_ptr<Session> s) {
-    std::string hdr =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: video/x-flv\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "Cache-Control: no-cache\r\n"
-        "Connection: keep-alive\r\n\r\n";
-    send_all(fd, hdr);
+static std::string b64_bytes(const uint8_t* p, size_t n) {
+    static const char* t = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string o;
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)p[i] << 16;
+        if (i + 1 < n) v |= (uint32_t)p[i + 1] << 8;
+        if (i + 2 < n) v |= p[i + 2];
+        o.push_back(t[(v >> 18) & 63]);
+        o.push_back(t[(v >> 12) & 63]);
+        o.push_back(i + 1 < n ? t[(v >> 6) & 63] : '=');
+        o.push_back(i + 2 < n ? t[v & 63] : '=');
+    }
+    return o;
+}
+
+void ws_send(int fd, const uint8_t* data, size_t n) {
+    uint8_t hdr[10];
+    size_t h = 0;
+    hdr[h++] = 0x82;
+    if (n < 126) {
+        hdr[h++] = (uint8_t)n;
+    } else if (n <= 0xFFFF) {
+        hdr[h++] = 126;
+        hdr[h++] = (uint8_t)(n >> 8);
+        hdr[h++] = (uint8_t)n;
+    } else {
+        hdr[h++] = 127;
+        for (int i = 7; i >= 0; --i) hdr[h++] = (uint8_t)((uint64_t)n >> (8 * i));
+    }
+    send(fd, hdr, h, MSG_NOSIGNAL);
+    if (n) send(fd, data, n, MSG_NOSIGNAL);
+}
+
+static std::string ws_accept_key(const std::string& key) {
+    std::string src = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    unsigned char dig[SHA_DIGEST_LENGTH];
+    SHA1(reinterpret_cast<const unsigned char*>(src.data()), src.size(), dig);
+    return b64_bytes(dig, SHA_DIGEST_LENGTH);
+}
+
+static bool ws_read_frame(int fd) {
+    uint8_t hdr[2];
+    if (recv(fd, hdr, 2, MSG_WAITALL) != 2) return false;
+    uint8_t opcode = hdr[0] & 0x0f;
+    uint64_t len = hdr[1] & 0x7f;
+    bool mask = hdr[1] & 0x80;
+    if (len == 126) {
+        uint8_t ext[2];
+        if (recv(fd, ext, 2, MSG_WAITALL) != 2) return false;
+        len = ((uint64_t)ext[0] << 8) | ext[1];
+    } else if (len == 127) {
+        uint8_t ext[8];
+        if (recv(fd, ext, 8, MSG_WAITALL) != 8) return false;
+        len = 0;
+        for (int i = 0; i < 8; ++i) len = (len << 8) | ext[i];
+    }
+    uint8_t mkey[4] = {};
+    if (mask && recv(fd, mkey, 4, MSG_WAITALL) != 4) return false;
+    std::vector<uint8_t> payload(len);
+    size_t got = 0;
+    while (got < payload.size()) {
+        ssize_t n = recv(fd, payload.data() + got, payload.size() - got, 0);
+        if (n <= 0) return false;
+        got += (size_t)n;
+    }
+    if (opcode == 0x8) return false;
+    if (opcode == 0x9) {
+        uint8_t ph[2] = {0x8A, (uint8_t)(len < 126 ? len : 0)};
+        send(fd, ph, 2, MSG_NOSIGNAL);
+        if (len && len < 126) send(fd, payload.data(), payload.size(), MSG_NOSIGNAL);
+    }
+    return true;
+}
+
+static void serve_flv(int fd, std::shared_ptr<Session> s, bool websocket) {
+    if (!websocket) {
+        std::string hdr =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: video/x-flv\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: keep-alive\r\n\r\n";
+        send_all(fd, hdr);
+    }
     auto init = s->flv_header_and_gop();
     int64_t base = init.size() > 13 ? flv_first_media_ts(init.data() + 13, init.size() - 13) : 0;
     if (init.size() > 13) flv_shift_tags(init.data() + 13, init.size() - 13, base);
-    send_all(fd, init.data(), init.size());
+    if (websocket) ws_send(fd, init.data(), init.size());
+    else send_all(fd, init.data(), init.size());
     auto sub = std::make_shared<Subscriber>();
     sub->fd = fd;
+    sub->websocket = websocket;
     sub->sent_header = true;
     sub->stamp_base = base;
     {
@@ -113,10 +193,14 @@ static void serve_flv(int fd, std::shared_ptr<Session> s) {
         s->subs.push_back(sub);
     }
     // 连接由 broadcast 写；这里阻塞读到对端关闭
-    char tmp[64];
-    while (s->running) {
-        ssize_t n = recv(fd, tmp, sizeof(tmp), 0);
-        if (n <= 0) break;
+    if (websocket) {
+        while (s->running && ws_read_frame(fd)) {}
+    } else {
+        char tmp[64];
+        while (s->running) {
+            ssize_t n = recv(fd, tmp, sizeof(tmp), 0);
+            if (n <= 0) break;
+        }
     }
     std::lock_guard<std::mutex> lk(s->mu);
     for (auto it = s->subs.begin(); it != s->subs.end(); ++it) {
@@ -237,7 +321,22 @@ void handle_client(Hub* hub, int fd) {
         if (dot != std::string::npos) id = id.substr(0, dot);
         auto s = hub->get(id);
         if (!s) { http_json(fd, 404, "{\"error\":\"no stream\"}"); close(fd); return; }
-        serve_flv(fd, s);
+        std::string upgrade = header_value(req, "Upgrade");
+        if (upgrade.empty()) upgrade = header_value(req, "upgrade");
+        bool websocket = upgrade.find("websocket") != std::string::npos || upgrade.find("WebSocket") != std::string::npos;
+        if (websocket) {
+            std::string key = header_value(req, "Sec-WebSocket-Key");
+            if (key.empty()) key = header_value(req, "sec-websocket-key");
+            std::string accept = ws_accept_key(key);
+            std::string hs =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: " + accept + "\r\n"
+                "Access-Control-Allow-Origin: *\r\n\r\n";
+            send_all(fd, hs);
+        }
+        serve_flv(fd, s, websocket);
         close(fd);
         return;
     }

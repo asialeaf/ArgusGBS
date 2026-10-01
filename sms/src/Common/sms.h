@@ -269,6 +269,7 @@ std::string host_ip();
 void sms_tcp_loop(std::shared_ptr<Session> s);
 void rtc_send(Session* s, const std::vector<NAL>& nals, uint32_t ts90);
 void rtc_stop(const std::shared_ptr<void>& player);
+void ws_send(int fd, const uint8_t* data, size_t n);
 
 std::vector<uint8_t> annexb_to_flv_tag(const NAL& nal, uint32_t& dts, const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps, bool& sent_seq);
 std::vector<uint8_t> flv_file_header(bool with_audio);
