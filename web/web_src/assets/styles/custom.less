@@ -1,0 +1,160 @@
+@import "~assets/styles/variables.less";
+
+.form-control:focus {
+  border-color: @base-border;
+  box-shadow: none;
+}
+
+.form-group {
+  .checkbox {
+      a {
+          white-space: nowrap;
+          color: @base;
+          &:hover {
+              color: @base-active;
+          }
+      }
+  }
+}
+
+.btn-primary,
+.btn-primary:focus, .btn-primary.focus,
+.btn-primary.disabled.focus, .btn-primary[disabled]:focus, fieldset[disabled] .btn-primary:focus,
+.btn-primary:active:focus, .btn-primary.active:focus,
+.btn-primary:active, .btn-primary.active {
+  background-color: @base;
+  border-color: @base-border;
+}
+
+.btn-primary:hover, .btn-primary.hover,
+.btn-primary.disabled:hover, .btn-primary[disabled]:hover, fieldset[disabled] .btn-primary:hover,
+.btn-primary:active:hover, .btn-primary.active:hover {
+  background-color: @base-active;
+  border-color: @base-border-active;
+}
+
+.nav-tabs-custom > .nav-tabs > li.active {
+  border-top-color: @base;
+}
+
+.dropdown-menu > .active > a, .dropdown-menu > .active > a:hover, .dropdown-menu > .active > a:focus {
+    background-color: @base;
+}
+
+.main-header {
+  .logo {
+    background-color: @base-active !important;
+  }
+  .navbar {
+    background-color: @base !important;
+  }
+  .sidebar-toggle {
+    background-color: @base !important;
+    &:hover,&:active,&:focus,&:visited{
+      background-color: @base-active !important;
+    }
+  }
+}
+
+@sidebar-bg: darken(@base, 25%);
+.main-sidebar {
+  background-color: @sidebar-bg !important;
+  .sidebar-menu {
+    li.active,li:hover {
+      a {
+        border-left-color: @base-active !important;
+      }
+    }
+    li.active,li:hover,li.menu-open {
+      a {
+        background: darken(@sidebar-bg, 3%);
+      }
+    }
+    li > a > .pull-right-container {
+      margin-top: -8px;
+    }
+  }
+}
+.left-side {
+  background-color: @sidebar-bg !important;
+}
+.main-footer {
+  padding: 10px !important;
+  text-align: center !important;
+  // border:0;
+  // color:#fff;
+  // background-color: @base;
+  // a {
+  //   color: #fff;
+  // }
+}
+
+.text-under-line {
+  text-decoration: underline;
+}
+.text-under-dashed {
+  text-decoration: underline dashed;
+}
+.text-under-dotted {
+  text-decoration: underline dotted;
+}
+.text-under-double {
+  text-decoration: underline double;
+}
+
+.text-primary {
+  color: @base;
+}
+
+a.text-primary:focus, a.text-primary:hover {
+  color: @base-active;
+}
+
+.box {
+  &.box-primary {
+    border-top-color: @base !important;
+  }
+}
+
+.callout.callout-primary, .alert-primary, .label-primary, .modal-primary .modal-body {
+  background-color: @base-active !important;
+  border-color: @base-active !important;
+}
+
+* {
+  outline: none !important;
+}
+
+.ellipsis {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.break-word {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  white-space: normal;
+  word-break: break-all;
+}
+
+.form-horizontal .form-group label, .form-inline .form-group label {
+  font-weight: 400;
+}
+
+.select2-container--default.select2-container--focus .select2-selection--multiple, .select2-container--default .select2-search--dropdown .select2-search__field {
+  border-color: @base !important;
+}
+
+.qcontent-header {
+  height: 50px;
+  padding:15px 10px 10px 12px;
+  background-color: white;
+  width: 100%;
+  font-weight: bold;
+  font-size: 16px;
+}
+
+::-ms-reveal {
+  display: none;
+}

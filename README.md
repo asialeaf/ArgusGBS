@@ -24,15 +24,15 @@ make all
 - 信令：`34020000002000000001`，域 `3402000000`，端口 `15060`，设备密码 `gbs12345`
 - 流媒体控制面：<http://127.0.0.1:10001/>
 
-前端静态文件按下面顺序自动查找：`www/`、`../GB28181-Server/www`、`../LiveCMS-linux-3.6.9-26093013/www`。用源码编译前端时：
+管理页源码在 `web/web_src`，部署时由 `argusweb` 镜像编译，nginx 提供页面并把 `/api` 转到信令。本地改页面：
 
 ```bash
-cd ../GB28181-Server/web_src
+cd web/web_src
 npm install
-npm run build
+npm run start
 ```
 
-`vue.config.js` 的开发代理已经指向 `127.0.0.1:10000`。
+开发服务把请求代理到 `127.0.0.1:10000`。`npm run build` 的结果在 `web/www`。
 
 ## 设备侧要填的参数
 
@@ -60,34 +60,31 @@ npm run build
 
 ## 镜像与部署
 
-推送到 `main` 或 `master` 时，GitHub Actions 构建 `arguscms`、`argussms` 并推到阿里云 ACR。仓库需要这些 Secrets，和 ProductCore 相同：
+推送到 `main` 或 `master` 时，GitHub Actions 构建 `arguscms`、`argussms`、`argusweb` 并推到阿里云 ACR。仓库需要这些 Secrets，和 ProductCore 相同：
 
 - `ALIYUN_ACR_REGISTRY`
 - `ALIYUN_ACR_NAMESPACE`
 - `ALIYUN_ACR_USER`
 - `ALIYUN_ACR_PASSWORD`
 
-镜像名是 `arguscms`、`argussms`，标签为 `sha-<短提交>`、同一次构建的版本标签和 `latest`。
+镜像名是 `arguscms`、`argussms`、`argusweb`，标签为 `sha-<短提交>`、同一次构建的版本标签和 `latest`。
 
-本地用 ACR 镜像启动：
-
-```bash
-cd deploy
-cp .env.example .env
-# 填写 ADVERTISE_IP（摄像头能访问的本机 IP）、ACR_IMAGE_PREFIX、WWW_DIR
-docker compose -f docker-compose.yml -f docker-compose.acr.yml pull
-docker compose -f docker-compose.yml -f docker-compose.acr.yml up -d --no-build
-```
-
-不拉镜像、在本机编译：
+在 `deploy` 目录执行，和 `/home/asialeaf/projects/deploy` 同一套命令：
 
 ```bash
 cd deploy
 cp .env.example .env
-docker compose up -d --build
+# 填写 ADVERTISE_IP、WEB_PORT、ALIYUN_ACR_*、ACR_IMAGE_PREFIX
+make sync-configs   # 把 ADVERTISE_IP 写入 configs/*.ini
+make prod-deploy    # 检查 env → 同步配置 → 登录 ACR → 拉镜像 → 启动
+make prod-ps
+make prod-logs
+make prod-down
 ```
 
-`ADVERTISE_IP` 会写进 SIP Contact 和收流 SDP。管理页默认 `http://<ADVERTISE_IP>:10000/`，账号 `admin` / `admin`。前端目录用 `WWW_DIR` 挂进信令容器的 `/app/www`。
+`make up` 不拉镜像，在本机编译后启动。`make up-images` 与 `make prod-deploy` 一样走 ACR 镜像。
+
+`ADVERTISE_IP` 会写进 SIP Contact 和收流 SDP。管理页是 `argusweb`，默认 `http://<ADVERTISE_IP>:10000/`，账号 `admin` / `admin`。信令 HTTP 只在容器网络里，浏览器通过前端的 `/api` 访问。
 
 ## 目录
 
@@ -100,5 +97,6 @@ docker compose up -d --build
 | `internal/store` | SQLite |
 | `sms/` | 流媒体服务 |
 | `configs/` | 本机直接运行的配置 |
-| `docker/` | 信令、流媒体镜像 |
+| `web/web_src` | 管理页源码，部署时打进 argusweb |
+| `docker/` | 信令、流媒体、前端镜像 |
 | `deploy/` | docker compose，本地构建或拉取 ACR 镜像 |

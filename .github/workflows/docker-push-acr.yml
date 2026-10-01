@@ -1,4 +1,4 @@
-# 构建 arguscms / argussms 并推送到阿里云 ACR
+# 构建 arguscms / argussms / argusweb 并推送到阿里云 ACR
 # Organization Secrets: ALIYUN_ACR_REGISTRY, ALIYUN_ACR_NAMESPACE, ALIYUN_ACR_USER, ALIYUN_ACR_PASSWORD
 
 name: Docker Build & Push (Aliyun ACR)
@@ -13,9 +13,9 @@ on:
         required: false
         default: ''
       targets:
-        description: 'cms / sms / cms,sms'
+        description: 'cms / sms / web / cms,sms,web'
         required: false
-        default: 'cms,sms'
+        default: 'cms,sms,web'
 
 concurrency:
   group: docker-acr-${{ github.ref }}
@@ -51,6 +51,7 @@ jobs:
           all_items = [
             {"id": "arguscms", "type": "cms", "file": "docker/Dockerfile.cms"},
             {"id": "argussms", "type": "sms", "file": "docker/Dockerfile.sms"},
+            {"id": "argusweb", "type": "web", "file": "docker/Dockerfile.web"},
           ]
           filt = os.environ.get("FILTER", "").strip().replace(" ", "")
           if filt:
@@ -128,4 +129,6 @@ jobs:
             echo "\`$REG/arguscms:$TAG\`"
             echo ""
             echo "\`$REG/argussms:$TAG\`"
+            echo ""
+            echo "\`$REG/argusweb:$TAG\`"
           } >> "$GITHUB_STEP_SUMMARY"

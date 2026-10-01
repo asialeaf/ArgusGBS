@@ -78,9 +78,8 @@ func findWWW(p string) string {
 		cands = append(cands, p)
 	}
 	cands = append(cands,
+		"web/www",
 		"www",
-		"../GB28181-Server/www",
-		"../LiveCMS-linux-3.6.9-26093013/www",
 	)
 	for _, c := range cands {
 		st, err := os.Stat(filepath.Join(c, "index.html"))

@@ -7,4 +7,6 @@ deploy/.env
 *.db-wal
 *.db-shm
 sms/build/
+web/web_src/node_modules/
+web/www/
 .idea/

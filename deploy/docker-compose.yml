@@ -1,5 +1,6 @@
-# 本地构建并启动 ArgusCMS + ArgusSMS
-# cd deploy && cp .env.example .env && docker compose up -d --build
+# 本地构建并启动前端、信令、流媒体
+# cd deploy && make up
+# ACR 镜像：make prod-deploy
 
 name: argusgbs
 
@@ -45,13 +46,10 @@ services:
       ARGUS_SMS_HOST: argussms
       ARGUS_SIP_HOST: ${ADVERTISE_IP:-}
       ARGUS_ADVERTISE_IP: ${ADVERTISE_IP:-}
-      ARGUS_WWW: /app/www
     volumes:
       - ./configs/arguscms.ini:/config/arguscms.ini:ro
-      - ${WWW_DIR:-./www}:/app/www:ro
       - argus_cms:/data
     ports:
-      - "${CMS_HTTP_PORT:-10000}:10000"
       - "${SIP_PORT:-15060}:15060/udp"
       - "${SIP_PORT:-15060}:15060/tcp"
     healthcheck:
@@ -60,6 +58,25 @@ services:
       timeout: 5s
       retries: 6
       start_period: 10s
+
+  argusweb:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+    image: argusgbs/argusweb:local
+    container_name: argusweb
+    restart: unless-stopped
+    depends_on:
+      arguscms:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-10000}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/login.html"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
 volumes:
   argus_cms:

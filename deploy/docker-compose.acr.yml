@@ -10,3 +10,7 @@ services:
   argussms:
     image: ${ACR_IMAGE_PREFIX}/argussms:${IMAGE_TAG:-latest}
     pull_policy: always
+
+  argusweb:
+    image: ${ACR_IMAGE_PREFIX}/argusweb:${IMAGE_TAG:-latest}
+    pull_policy: always
