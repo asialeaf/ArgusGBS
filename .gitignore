@@ -1,0 +1,10 @@
+/data/
+/bin/
+sms/argussms
+deploy/.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+sms/build/
+.idea/

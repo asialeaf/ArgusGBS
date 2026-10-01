@@ -1,0 +1,66 @@
+# 本地构建并启动 ArgusCMS + ArgusSMS
+# cd deploy && cp .env.example .env && docker compose up -d --build
+
+name: argusgbs
+
+services:
+  argussms:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.sms
+    image: argusgbs/argussms:local
+    container_name: argussms
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      ARGUS_ADVERTISE_IP: ${ADVERTISE_IP:-}
+    volumes:
+      - ./configs/argussms.ini:/config/argussms.ini:ro
+      - argus_sms:/data
+    ports:
+      - "${SMS_HTTP_PORT:-10001}:10001"
+      - "${RTP_PORT_RANGE:-30000-30249}:30000-30249/udp"
+      - "${RTP_PORT_RANGE:-30000-30249}:30000-30249/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10001/api/v1/serverinfo"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  arguscms:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cms
+    image: argusgbs/arguscms:local
+    container_name: arguscms
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      argussms:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      ARGUS_SMS_HOST: argussms
+      ARGUS_SIP_HOST: ${ADVERTISE_IP:-}
+      ARGUS_ADVERTISE_IP: ${ADVERTISE_IP:-}
+      ARGUS_WWW: /app/www
+    volumes:
+      - ./configs/arguscms.ini:/config/arguscms.ini:ro
+      - ${WWW_DIR:-./www}:/app/www:ro
+      - argus_cms:/data
+    ports:
+      - "${CMS_HTTP_PORT:-10000}:10000"
+      - "${SIP_PORT:-15060}:15060/udp"
+      - "${SIP_PORT:-15060}:15060/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10000/api/v1/getserverinfo"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  argus_cms:
+  argus_sms:

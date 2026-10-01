@@ -1,0 +1,12 @@
+# 使用 ACR 预构建镜像（与 docker-compose.yml 叠加，不本地 build）
+# docker compose -f docker-compose.yml -f docker-compose.acr.yml pull
+# docker compose -f docker-compose.yml -f docker-compose.acr.yml up -d --no-build
+
+services:
+  arguscms:
+    image: ${ACR_IMAGE_PREFIX}/arguscms:${IMAGE_TAG:-latest}
+    pull_policy: always
+
+  argussms:
+    image: ${ACR_IMAGE_PREFIX}/argussms:${IMAGE_TAG:-latest}
+    pull_policy: always

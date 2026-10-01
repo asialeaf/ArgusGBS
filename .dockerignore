@@ -1,0 +1,8 @@
+.git
+bin
+data
+sms/argussms
+sms/build
+**/*.db
+**/*.db-*
+deploy/.env
