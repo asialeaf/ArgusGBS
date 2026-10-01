@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -38,6 +39,9 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/logout", a.logout)
 	mux.HandleFunc("GET /api/v1/userinfo", a.userinfo)
 	mux.HandleFunc("GET /api/v1/getserverinfo", a.serverinfo)
+	mux.HandleFunc("GET /api/v1/getrequestkey", a.auth(a.requestKey))
+	mux.HandleFunc("GET /api/v1/sms/getrequestkey", a.auth(a.smsRequestKey))
+	mux.HandleFunc("GET /api/v1/sms/getserverinfo", a.auth(a.smsServerInfo))
 	mux.HandleFunc("POST /api/v1/modifypassword", a.auth(a.modifyPassword))
 	mux.HandleFunc("POST /api/v1/restart", a.auth(a.restart))
 	mux.HandleFunc("GET /api/v1/getbaseconfig", a.auth(a.getBaseConfig))
@@ -381,6 +385,37 @@ func (a *API) setPwdConfig(w http.ResponseWriter, r *http.Request) {
 		a.Cfg.PwdLength = atoi(v, a.Cfg.PwdLength)
 	}
 	writeJSON(w, map[string]any{})
+}
+
+func machineKey(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return strings.ToUpper(hex.EncodeToString(sum[:16]))
+}
+
+func (a *API) requestKey(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"RequestKey": machineKey(a.Cfg.Serial), "State": "0"})
+}
+
+func (a *API) smsRequestKey(w http.ResponseWriter, r *http.Request) {
+	serial := r.URL.Query().Get("serial")
+	if serial == "" {
+		serial = a.Cfg.SMSSerial
+	}
+	writeJSON(w, map[string]any{"RequestKey": machineKey(serial), "State": "0"})
+}
+
+func (a *API) smsServerInfo(w http.ResponseWriter, r *http.Request) {
+	_, _, chTotal, _ := a.DB.OnlineStats()
+	writeJSON(w, map[string]any{
+		"Authorization": "ArgusGBS", "Hardware": metrics.Hardware(),
+		"InterfaceVersion": "v1", "RemainDays": 3650,
+		"RunningTime":  metrics.Running(a.Started),
+		"Server":       "ArgusSMS",
+		"ServerTime":   model.FormatTime(time.Now()),
+		"StartUpTime":  model.FormatTime(a.Started),
+		"VersionType":  "旗舰版",
+		"ChannelCount": chTotal,
+	})
 }
 
 func (a *API) smsList(w http.ResponseWriter, r *http.Request) {
