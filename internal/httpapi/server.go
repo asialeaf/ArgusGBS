@@ -239,7 +239,8 @@ func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 func (a *API) userinfo(w http.ResponseWriter, r *http.Request) {
 	u := a.currentUser(r)
 	if u == nil {
-		http.Error(w, "未登录或登录已过期", http.StatusUnauthorized)
+		// 未登录时前端用 null 判断并跳到登录页。返回 401 正文会被全局 ajax 错误弹出来。
+		writeJSON(w, nil)
 		return
 	}
 	roles := strings.Split(u.Role, ",")
