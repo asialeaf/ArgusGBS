@@ -2,6 +2,5 @@ dist
 node_modules
 vscode
 dll
-www
 .reasonix
 *.log

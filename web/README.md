@@ -15,7 +15,7 @@ LiveGBS 前端工程源码
 
 npm install -g cross-env
 
-cd web_src
+cd web
 # 安装 npm 依赖
 npm install
 # 或
@@ -31,6 +31,6 @@ npm run build
 
 # 调主题色
 
-1. web_src > assets > styles > element-custom.scss > $--color-primary
+1. web > assets > styles > element-custom.scss > $--color-primary
 
-2. web_src > assets > styles > variables.less > @base
+2. web > assets > styles > variables.less > @base

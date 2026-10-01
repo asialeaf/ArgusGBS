@@ -3,8 +3,8 @@ bin
 data
 sms/argussms
 sms/build
-web/web_src/node_modules
-web/www
+web/node_modules
+web/dist
 **/*.db
 **/*.db-*
 deploy/.env

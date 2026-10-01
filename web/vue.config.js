@@ -7,9 +7,7 @@ function resolve(dir) {
     return path.resolve(__dirname, dir)
 }
 
-const outputDir = process.env.WWW_OUT
-    ? path.resolve(process.env.WWW_OUT)
-    : resolve('../www');
+const outputDir = resolve('dist');
 
 module.exports = {
     outputDir,

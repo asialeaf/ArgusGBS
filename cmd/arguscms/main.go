@@ -61,9 +61,6 @@ func applyEnv(cfg *config.Config) {
 	if v := os.Getenv("ARGUS_SMS_HOST"); v != "" {
 		cfg.SMSHost = v
 	}
-	if v := os.Getenv("ARGUS_WWW"); v != "" {
-		cfg.WWWDir = v
-	}
 	if v := os.Getenv("ARGUS_ADVERTISE_IP"); v != "" {
 		cfg.SMSPublicHost = v
 		if cfg.SIPHost == "" {
@@ -77,10 +74,6 @@ func findWWW(p string) string {
 	if p != "" {
 		cands = append(cands, p)
 	}
-	cands = append(cands,
-		"web/www",
-		"www",
-	)
 	for _, c := range cands {
 		st, err := os.Stat(filepath.Join(c, "index.html"))
 		if err == nil && !st.IsDir() {

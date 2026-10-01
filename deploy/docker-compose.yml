@@ -70,9 +70,9 @@ services:
       arguscms:
         condition: service_healthy
     ports:
-      - "${WEB_PORT:-10000}:80"
+      - "${WEB_PORT:-10000}:10000"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/login.html"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10000/login.html"]
       interval: 10s
       timeout: 5s
       retries: 12

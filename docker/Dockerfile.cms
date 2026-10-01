@@ -15,7 +15,7 @@ ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=builder /out/arguscms /app/arguscms
 COPY deploy/configs/arguscms.ini /config/arguscms.ini
-VOLUME ["/data", "/app/www"]
+VOLUME ["/data"]
 EXPOSE 10000 15060/tcp 15060/udp
 ENTRYPOINT ["/app/arguscms"]
 CMD ["-config", "/config/arguscms.ini"]

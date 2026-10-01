@@ -24,15 +24,15 @@ make all
 - 信令：`34020000002000000001`，域 `3402000000`，端口 `15060`，设备密码 `gbs12345`
 - 流媒体控制面：<http://127.0.0.1:10001/>
 
-管理页源码在 `web/web_src`，部署时由 `argusweb` 镜像编译，nginx 提供页面并把 `/api` 转到信令。本地改页面：
+管理页源码在 `web/`，部署时由 `argusweb` 镜像编译，nginx 提供页面并把 `/api` 转到信令。本地改页面：
 
 ```bash
-cd web/web_src
+cd web
 npm install
 npm run start
 ```
 
-开发服务把请求代理到 `127.0.0.1:10000`。`npm run build` 的结果在 `web/www`。
+开发服务把请求代理到 `127.0.0.1:10000`。
 
 ## 设备侧要填的参数
 
@@ -97,6 +97,6 @@ make prod-down
 | `internal/store` | SQLite |
 | `sms/` | 流媒体服务 |
 | `configs/` | 本机直接运行的配置 |
-| `web/web_src` | 管理页源码，部署时打进 argusweb |
+| `web/` | 管理页源码，部署时打进 argusweb |
 | `docker/` | 信令、流媒体、前端镜像 |
 | `deploy/` | docker compose，本地构建或拉取 ACR 镜像 |
