@@ -492,17 +492,61 @@ static bool h264_skip(int t) {
     return t == 6 || t == 9 || t == 10 || t == 11 || t == 12;
 }
 
+static void push_stap(std::vector<std::vector<uint8_t>>& all, uint16_t& seq, uint32_t ts90, uint32_t ssrc, uint8_t pt,
+                       const std::vector<std::pair<const uint8_t*, size_t>>& sets) {
+    if (sets.empty()) return;
+    if (sets.size() == 1) {
+        auto nal = sets[0].first;
+        size_t len = sets[0].second;
+        std::vector<uint8_t> pkt(12 + len);
+        put_rtp(pkt.data(), seq++, ts90, ssrc, false, pt);
+        memcpy(pkt.data() + 12, nal, len);
+        all.push_back(std::move(pkt));
+        return;
+    }
+    size_t bytes = 1;
+    uint8_t nri = 0;
+    for (auto& s : sets) {
+        bytes += 2 + s.second;
+        nri = std::max(nri, (uint8_t)(s.first[0] & 0x60));
+    }
+    std::vector<uint8_t> pkt(12 + bytes);
+    put_rtp(pkt.data(), seq++, ts90, ssrc, false, pt);
+    pkt[12] = nri | 24;
+    size_t o = 13;
+    for (auto& s : sets) {
+        pkt[o] = (uint8_t)(s.second >> 8);
+        pkt[o + 1] = (uint8_t)s.second;
+        memcpy(pkt.data() + o + 2, s.first, s.second);
+        o += 2 + s.second;
+    }
+    all.push_back(std::move(pkt));
+}
+
 static std::vector<std::vector<uint8_t>> packetize_nals(const std::vector<NAL>& nals, uint32_t ts90, uint32_t ssrc, uint8_t pt) {
     int last_vcl = -1;
+    std::vector<std::pair<const uint8_t*, size_t>> sets;
     for (size_t i = 0; i < nals.size(); ++i) {
         int t = h264_type(nals[i]);
         if (t == 1 || t == 5) last_vcl = (int)i;
+        if (t != 7 && t != 8) continue;
+        size_t len = 0;
+        const uint8_t* nal = nal_bytes(nals[i], len);
+        if (nal && len > 0) sets.emplace_back(nal, len);
     }
     std::vector<std::vector<uint8_t>> all;
     uint16_t seq = 1;
+    bool sets_sent = false;
     for (size_t i = 0; i < nals.size(); ++i) {
         int t = h264_type(nals[i]);
         if (t < 0 || h264_skip(t)) continue;
+        if (t == 7 || t == 8) {
+            if (!sets_sent) {
+                push_stap(all, seq, ts90, ssrc, pt, sets);
+                sets_sent = true;
+            }
+            continue;
+        }
         size_t len = 0;
         const uint8_t* nal = nal_bytes(nals[i], len);
         if (!nal || len == 0) continue;
