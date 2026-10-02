@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/argus/argusgbs/internal/model"
 )
@@ -42,6 +44,10 @@ func (a *API) userSave(w http.ResponseWriter, r *http.Request) {
 	me := a.currentUser(r)
 	if me != nil {
 		u.Creator = me.Username
+		if strings.Contains(u.Role, roleSuper) && !strings.Contains(me.Role, roleSuper) {
+			http.Error(w, "没有权限", http.StatusForbidden)
+			return
+		}
 	}
 	pwd := ""
 	plain := ""
@@ -77,11 +83,50 @@ func (a *API) userEnable(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) userResetPwd(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	id, _ := strconv.ParseInt(first(r, "id"), 10, 64)
-	plain := "Argus@123"
-	sum := md5.Sum([]byte(plain))
-	_ = a.DB.SetUserPassword(id, hex.EncodeToString(sum[:]))
-	writeJSON(w, map[string]any{"DefaultUserPassword": plain})
+	me := a.currentUser(r)
+	if me == nil {
+		http.Error(w, "未登录或登录已过期", http.StatusUnauthorized)
+		return
+	}
+	idStr := first(r, "id")
+	id, _ := strconv.ParseInt(idStr, 10, 64)
+	plain := r.Form.Get("password")
+	timestamp := r.Form.Get("timestamp")
+	verify := strings.ToLower(r.Form.Get("verify"))
+	if plain == "" || timestamp == "" || verify == "" {
+		http.Error(w, "缺少密码校验", http.StatusBadRequest)
+		return
+	}
+	ts, err := time.ParseInLocation("20060102150405", timestamp, time.Local)
+	if err != nil || time.Since(ts) > 10*time.Minute || ts.After(time.Now().Add(2*time.Minute)) {
+		http.Error(w, "校验已过期，请重试", http.StatusBadRequest)
+		return
+	}
+	expect := md5hex(idStr + plain + timestamp + strings.ToLower(me.PasswordMD5))
+	if !ctEqual(expect, verify) {
+		http.Error(w, "我的密码不正确", http.StatusBadRequest)
+		return
+	}
+	target, err := a.DB.GetUser(id)
+	if err != nil || target == nil {
+		http.Error(w, "用户不存在", http.StatusNotFound)
+		return
+	}
+	if strings.Contains(target.Role, roleSuper) && !hasAnyRole(me, roleSuper) {
+		http.Error(w, "没有权限", http.StatusForbidden)
+		return
+	}
+	if msg := a.passwordOK(plain); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	if err := a.DB.SetUserPassword(id, md5hex(plain)); err != nil {
+		http.Error(w, "保存密码失败", http.StatusInternalServerError)
+		return
+	}
+	a.DB.DeleteUserSessions(id)
+	writeJSON(w, map[string]any{})
+	a.audit(r, me, "重置密码", "200")
 }
 
 func (a *API) userUnlock(w http.ResponseWriter, r *http.Request) {

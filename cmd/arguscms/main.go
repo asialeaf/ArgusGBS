@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"flag"
 	"log"
 	"net/http"
@@ -39,7 +41,10 @@ func main() {
 	}
 	addr := ":" + itoa(cfg.HTTPPort)
 	log.Printf("ArgusCMS HTTP %s  前端 %s", addr, api.WWW)
-	log.Printf("默认账号 admin / admin")
+	sum := md5.Sum([]byte("admin"))
+	if u, err := db.GetUserByName("admin"); err == nil && u.PasswordMD5 == hex.EncodeToString(sum[:]) {
+		log.Printf("管理员仍使用初始密码，登录后请立刻修改")
+	}
 	if cfg.HTTPSPort > 0 && cfg.HTTPSCert != "" && cfg.HTTPSKey != "" {
 		go func() {
 			haddr := ":" + itoa(cfg.HTTPSPort)

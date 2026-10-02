@@ -3,10 +3,13 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/sha.h>
 #include <sstream>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
 #include <iostream>
 #include <vector>
 
@@ -70,6 +73,62 @@ static std::string header_value(const std::string& h, const std::string& k) {
     auto end = h.find("\r\n", pos);
     if (end == std::string::npos) return h.substr(pos);
     return h.substr(pos, end - pos);
+}
+
+static bool peer_loopback(int fd) {
+    sockaddr_storage ss{};
+    socklen_t sl = sizeof(ss);
+    if (getpeername(fd, (sockaddr*)&ss, &sl) != 0) return false;
+    if (ss.ss_family == AF_INET) return ((sockaddr_in*)&ss)->sin_addr.s_addr == htonl(INADDR_LOOPBACK);
+    if (ss.ss_family == AF_INET6) return IN6_IS_ADDR_LOOPBACK(&((sockaddr_in6*)&ss)->sin6_addr);
+    return false;
+}
+
+static std::string query_get(const std::string& query, const std::string& key) {
+    std::string pat = key + "=";
+    size_t p = 0;
+    while (p <= query.size()) {
+        if ((p == 0 || query[p - 1] == '&') && query.compare(p, pat.size(), pat) == 0) {
+            p += pat.size();
+            auto end = query.find('&', p);
+            if (end == std::string::npos) return query.substr(p);
+            return query.substr(p, end - p);
+        }
+        auto amp = query.find('&', p);
+        if (amp == std::string::npos) break;
+        p = amp + 1;
+    }
+    return "";
+}
+
+static bool token_ok(const std::string& secret, const std::string& id, const std::string& query) {
+    std::string exp = query_get(query, "e");
+    std::string sig = query_get(query, "s");
+    if (exp.empty() || sig.size() != 64 || id.empty()) return false;
+    long long e = std::atoll(exp.c_str());
+    long long now = (long long)time(nullptr);
+    if (e < now - 60 || e > now + 48 * 3600) return false;
+    std::string msg = id + "." + exp;
+    unsigned char out[EVP_MAX_MD_SIZE];
+    unsigned int len = 0;
+    if (!HMAC(EVP_sha256(), secret.data(), (int)secret.size(), (const unsigned char*)msg.data(), msg.size(), out, &len) || len != 32) return false;
+    static const char* hexd = "0123456789abcdef";
+    unsigned diff = 0;
+    for (unsigned i = 0; i < len; ++i) {
+        diff |= (unsigned char)(hexd[out[i] >> 4] ^ sig[i * 2]);
+        diff |= (unsigned char)(hexd[out[i] & 0xf] ^ sig[i * 2 + 1]);
+    }
+    return diff == 0;
+}
+
+static bool allow_play(Hub* hub, int fd, const std::string& id, const std::string& query) {
+    if (hub->secret.empty() || peer_loopback(fd)) return true;
+    return token_ok(hub->secret, id, query);
+}
+
+static bool allow_control(Hub* hub, int fd, const std::string& req) {
+    if (hub->secret.empty() || peer_loopback(fd)) return true;
+    return header_value(req, "X-Argus-Secret") == hub->secret;
 }
 
 static std::string json_get(const std::string& body, const std::string& key) {
@@ -253,6 +312,11 @@ void handle_client(Hub* hub, int fd) {
         close(fd);
         return;
     }
+    if (path.rfind("/api/v1/rtp/", 0) == 0 && !allow_control(hub, fd, req)) {
+        http_json(fd, 403, "{\"error\":\"forbidden\"}");
+        close(fd);
+        return;
+    }
     if (path == "/api/v1/rtp/open" && method == "POST") {
         std::string id = json_get(body, "stream_id");
         std::string tr = json_get(body, "transport");
@@ -320,6 +384,11 @@ void handle_client(Hub* hub, int fd) {
         std::string id = path.substr(6);
         auto dot = id.find('.');
         if (dot != std::string::npos) id = id.substr(0, dot);
+        if (!allow_play(hub, fd, id, query)) {
+            http_json(fd, 403, "{\"error\":\"forbidden\"}");
+            close(fd);
+            return;
+        }
         auto s = hub->get(id);
         if (!s) { http_json(fd, 404, "{\"error\":\"no stream\"}"); close(fd); return; }
         std::string upgrade = header_value(req, "Upgrade");
@@ -347,10 +416,26 @@ void handle_client(Hub* hub, int fd) {
         if (slash != std::string::npos) {
             std::string id = rest.substr(0, slash);
             std::string file = rest.substr(slash + 1);
+            if (!allow_play(hub, fd, id, query)) {
+                http_json(fd, 403, "{\"error\":\"forbidden\"}");
+                close(fd);
+                return;
+            }
             auto s = hub->get(id);
             if (!s) { http_json(fd, 404, "{\"error\":\"no stream\"}"); close(fd); return; }
             if (file == "index.m3u8") {
                 std::string pl = s->hls_m3u8();
+                if (!query.empty()) {
+                    std::string rewritten;
+                    std::istringstream pin(pl);
+                    std::string line;
+                    while (std::getline(pin, line)) {
+                        if (!line.empty() && line.back() == '\r') line.pop_back();
+                        if (!line.empty() && line[0] != '#') line += "?" + query;
+                        rewritten += line + "\n";
+                    }
+                    pl.swap(rewritten);
+                }
                 http_raw(fd, 200, "OK", "application/vnd.apple.mpegurl", "Cache-Control: no-cache\r\n",
                          (const uint8_t*)pl.data(), pl.size());
                 close(fd);
@@ -378,6 +463,11 @@ void handle_client(Hub* hub, int fd) {
             }
         }
         while (!id.empty() && id.back() == '/') id.pop_back();
+        if (!allow_play(hub, fd, id, query)) {
+            http_json(fd, 403, "{\"error\":\"forbidden\"}");
+            close(fd);
+            return;
+        }
         bool as_json = !body.empty() && body[0] == '{';
         std::string offer = body;
         if (as_json) {

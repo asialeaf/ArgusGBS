@@ -508,6 +508,12 @@ func (s *Store) DeleteSession(token string) {
 	_, _ = s.db.Exec(`DELETE FROM sessions WHERE token=? OR url_token=?`, token, token)
 }
 
+func (s *Store) DeleteUserSessions(userID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, _ = s.db.Exec(`DELETE FROM sessions WHERE user_id=?`, userID)
+}
+
 func safeSort(sort string, allow map[string]string, def string) string {
 	if c, ok := allow[sort]; ok {
 		return c

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/argus/argusgbs/internal/config"
@@ -31,8 +32,10 @@ type API struct {
 	DB      *store.Store
 	SIP     *sip.Server
 	Media   *media.Client
-	WWW     string
-	Started time.Time
+	WWW       string
+	Started   time.Time
+	fails     *loginGate
+	loginOnce sync.Once
 }
 
 func (a *API) Handler() http.Handler {
@@ -47,15 +50,15 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/sms/getserverinfo", a.auth(a.smsServerInfo))
 	mux.HandleFunc("GET /sms/{serial}/snap/{device}/{name}", a.auth(a.channelSnap))
 	mux.HandleFunc("POST /api/v1/modifypassword", a.auth(a.modifyPassword))
-	mux.HandleFunc("POST /api/v1/restart", a.auth(a.restart))
-	mux.HandleFunc("GET /api/v1/getbaseconfig", a.auth(a.getBaseConfig))
+	mux.HandleFunc("POST /api/v1/restart", a.authRoles(a.restart, roleSuper))
+	mux.HandleFunc("GET /api/v1/getbaseconfig", a.authRoles(a.getBaseConfig, roleSuper))
 	mux.HandleFunc("GET /api/v1/gm/cert/list", a.auth(a.gmCertList))
-	mux.HandleFunc("POST /api/v1/setbaseconfig", a.auth(a.setBaseConfig))
-	mux.HandleFunc("GET /api/v1/getpwdconfig", a.auth(a.getPwdConfig))
-	mux.HandleFunc("POST /api/v1/setpwdconfig", a.auth(a.setPwdConfig))
+	mux.HandleFunc("POST /api/v1/setbaseconfig", a.authRoles(a.setBaseConfig, roleSuper))
+	mux.HandleFunc("GET /api/v1/getpwdconfig", a.authRoles(a.getPwdConfig, roleSuper))
+	mux.HandleFunc("POST /api/v1/setpwdconfig", a.authRoles(a.setPwdConfig, roleSuper))
 	mux.HandleFunc("GET /api/v1/sms/list", a.auth(a.smsList))
-	mux.HandleFunc("GET /api/v1/sms/getbaseconfig", a.auth(a.smsGet))
-	mux.HandleFunc("POST /api/v1/sms/setbaseconfig", a.auth(a.smsSet))
+	mux.HandleFunc("GET /api/v1/sms/getbaseconfig", a.authRoles(a.smsGet, roleSuper))
+	mux.HandleFunc("POST /api/v1/sms/setbaseconfig", a.authRoles(a.smsSet, roleSuper))
 
 	mux.HandleFunc("GET /api/v1/dashboard/auth", a.auth(a.dashAuth))
 	mux.HandleFunc("GET /api/v1/dashboard/store", a.auth(a.dashStore))
@@ -69,11 +72,11 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/device/channeltree", a.auth(a.channelTree))
 	mux.HandleFunc("GET /api/v1/device/grouptree", a.auth(a.groupTree))
 	mux.HandleFunc("GET /api/v1/device/onlinestats", a.auth(a.onlineStats))
-	mux.HandleFunc("POST /api/v1/device/remove", a.auth(a.deviceRemove))
-	mux.HandleFunc("POST /api/v1/device/setinfo", a.auth(a.deviceSetInfo))
+	mux.HandleFunc("POST /api/v1/device/remove", a.authRoles(a.deviceRemove, roleAdmin))
+	mux.HandleFunc("POST /api/v1/device/setinfo", a.authRoles(a.deviceSetInfo, roleAdmin))
 	mux.HandleFunc("POST /api/v1/device/setname", a.auth(a.deviceSetName))
-	mux.HandleFunc("POST /api/v1/device/setmediatransport", a.auth(a.deviceSetTransport))
-	mux.HandleFunc("POST /api/v1/device/setsms", a.auth(a.deviceSetSMS))
+	mux.HandleFunc("POST /api/v1/device/setmediatransport", a.authRoles(a.deviceSetTransport, roleAdmin))
+	mux.HandleFunc("POST /api/v1/device/setsms", a.authRoles(a.deviceSetSMS, roleAdmin))
 	mux.HandleFunc("GET /api/v1/device/fetchcatalog", a.auth(a.fetchCatalog))
 	mux.HandleFunc("GET /api/v1/device/fetchinfo", a.auth(a.fetchInfo))
 	mux.HandleFunc("GET /api/v1/device/fetchstatus", a.auth(a.fetchStatus))
@@ -121,40 +124,40 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/control/wiper", a.auth(a.simpleControl("Wiper", "")))
 	mux.HandleFunc("POST /api/v1/control/filllight", a.auth(a.simpleControl("FillLight", "")))
 
-	mux.HandleFunc("GET /api/v1/user/list", a.auth(a.userList))
-	mux.HandleFunc("GET /api/v1/user/info", a.auth(a.userGet))
-	mux.HandleFunc("POST /api/v1/user/save", a.auth(a.userSave))
-	mux.HandleFunc("POST /api/v1/user/remove", a.auth(a.userRemove))
-	mux.HandleFunc("POST /api/v1/user/setenable", a.auth(a.userEnable))
-	mux.HandleFunc("POST /api/v1/user/resetpassword", a.auth(a.userResetPwd))
-	mux.HandleFunc("POST /api/v1/user/unlock", a.auth(a.userUnlock))
-	mux.HandleFunc("POST /api/v1/user/sethasallchannel", a.auth(a.userAllChannel))
-	mux.HandleFunc("POST /api/v1/user/savechannels", a.auth(a.userSaveChannels))
-	mux.HandleFunc("POST /api/v1/user/removechannels", a.auth(a.userRemoveChannels))
+	mux.HandleFunc("GET /api/v1/user/list", a.authRoles(a.userList, roleAdmin))
+	mux.HandleFunc("GET /api/v1/user/info", a.authRoles(a.userGet, roleAdmin))
+	mux.HandleFunc("POST /api/v1/user/save", a.authRoles(a.userSave, roleAdmin))
+	mux.HandleFunc("POST /api/v1/user/remove", a.authRoles(a.userRemove, roleAdmin))
+	mux.HandleFunc("POST /api/v1/user/setenable", a.authRoles(a.userEnable, roleAdmin))
+	mux.HandleFunc("POST /api/v1/user/resetpassword", a.authRoles(a.userResetPwd, roleAdmin))
+	mux.HandleFunc("POST /api/v1/user/unlock", a.authRoles(a.userUnlock, roleAdmin))
+	mux.HandleFunc("POST /api/v1/user/sethasallchannel", a.authRoles(a.userAllChannel, roleAdmin))
+	mux.HandleFunc("POST /api/v1/user/savechannels", a.authRoles(a.userSaveChannels, roleAdmin))
+	mux.HandleFunc("POST /api/v1/user/removechannels", a.authRoles(a.userRemoveChannels, roleAdmin))
 	mux.HandleFunc("GET /api/v1/user/channellist", a.auth(a.channelList))
 
-	mux.HandleFunc("GET /api/v1/cascade/list", a.auth(a.cascadeList))
-	mux.HandleFunc("POST /api/v1/cascade/save", a.auth(a.cascadeSave))
-	mux.HandleFunc("POST /api/v1/cascade/remove", a.auth(a.cascadeRemove))
-	mux.HandleFunc("POST /api/v1/cascade/setenable", a.auth(a.cascadeEnable))
-	mux.HandleFunc("POST /api/v1/cascade/setshareallchannel", a.auth(a.cascadeShareAll))
-	mux.HandleFunc("POST /api/v1/cascade/savechannels", a.auth(a.cascadeSaveChannels))
-	mux.HandleFunc("POST /api/v1/cascade/removechannels", a.auth(a.cascadeRemoveChannels))
+	mux.HandleFunc("GET /api/v1/cascade/list", a.authRoles(a.cascadeList, roleAdmin))
+	mux.HandleFunc("POST /api/v1/cascade/save", a.authRoles(a.cascadeSave, roleAdmin))
+	mux.HandleFunc("POST /api/v1/cascade/remove", a.authRoles(a.cascadeRemove, roleAdmin))
+	mux.HandleFunc("POST /api/v1/cascade/setenable", a.authRoles(a.cascadeEnable, roleAdmin))
+	mux.HandleFunc("POST /api/v1/cascade/setshareallchannel", a.authRoles(a.cascadeShareAll, roleAdmin))
+	mux.HandleFunc("POST /api/v1/cascade/savechannels", a.authRoles(a.cascadeSaveChannels, roleAdmin))
+	mux.HandleFunc("POST /api/v1/cascade/removechannels", a.authRoles(a.cascadeRemoveChannels, roleAdmin))
 	mux.HandleFunc("GET /api/v1/cascade/channellist", a.auth(a.channelList))
 
 	mux.HandleFunc("GET /api/v1/alarm/list", a.auth(a.alarmList))
 	mux.HandleFunc("POST /api/v1/alarm/remove", a.auth(a.alarmRemove))
 	mux.HandleFunc("POST /api/v1/alarm/clear", a.auth(a.alarmClear))
-	mux.HandleFunc("GET /api/v1/log/list", a.auth(a.logList))
-	mux.HandleFunc("POST /api/v1/log/clear", a.auth(a.logClear))
-	mux.HandleFunc("POST /api/v1/log/remove", a.auth(a.logClear))
+	mux.HandleFunc("GET /api/v1/log/list", a.authRoles(a.logList, roleSuper))
+	mux.HandleFunc("POST /api/v1/log/clear", a.authRoles(a.logClear, roleSuper))
+	mux.HandleFunc("POST /api/v1/log/remove", a.authRoles(a.logClear, roleSuper))
 
-	mux.HandleFunc("GET /api/v1/black/list", a.auth(a.ruleList("black")))
-	mux.HandleFunc("POST /api/v1/black/save", a.auth(a.ruleSave("black")))
-	mux.HandleFunc("POST /api/v1/black/remove", a.auth(a.ruleRemove("black")))
-	mux.HandleFunc("GET /api/v1/white/list", a.auth(a.ruleList("white")))
-	mux.HandleFunc("POST /api/v1/white/save", a.auth(a.ruleSave("white")))
-	mux.HandleFunc("POST /api/v1/white/remove", a.auth(a.ruleRemove("white")))
+	mux.HandleFunc("GET /api/v1/black/list", a.authRoles(a.ruleList("black"), roleAdmin))
+	mux.HandleFunc("POST /api/v1/black/save", a.authRoles(a.ruleSave("black"), roleAdmin))
+	mux.HandleFunc("POST /api/v1/black/remove", a.authRoles(a.ruleRemove("black"), roleAdmin))
+	mux.HandleFunc("GET /api/v1/white/list", a.authRoles(a.ruleList("white"), roleAdmin))
+	mux.HandleFunc("POST /api/v1/white/save", a.authRoles(a.ruleSave("white"), roleAdmin))
+	mux.HandleFunc("POST /api/v1/white/remove", a.authRoles(a.ruleRemove("white"), roleAdmin))
 
 	mux.HandleFunc("GET /api/v1/cloudrecord/querydaily", a.auth(a.cloudDaily))
 	mux.HandleFunc("GET /api/v1/cloudrecord/querychannels", a.auth(a.channelList))
@@ -166,21 +169,6 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/internal/sms/register", a.smsRegister)
 	mux.HandleFunc("/", a.staticOrAPI)
 	return mux
-}
-
-func (a *API) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !a.Cfg.APIAuth {
-			next(w, r)
-			return
-		}
-		u := a.currentUser(r)
-		if u == nil {
-			http.Error(w, "未登录或登录已过期", http.StatusUnauthorized)
-			return
-		}
-		next(w, r)
-	}
 }
 
 func (a *API) currentUser(r *http.Request) *model.User {
@@ -207,15 +195,26 @@ func (a *API) currentUser(r *http.Request) *model.User {
 
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	username := r.Form.Get("username")
-	password := r.Form.Get("password")
+	username := strings.TrimSpace(r.Form.Get("username"))
+	password := strings.ToLower(strings.TrimSpace(r.Form.Get("password")))
 	if username == "" || password == "" {
 		http.Error(w, "用户名或密码为空", http.StatusBadRequest)
 		return
 	}
+	key := clientIP(r) + "\n" + strings.ToLower(username)
+	if a.gate().blocked(key, time.Now()) {
+		http.Error(w, "登录失败次数过多，请 15 分钟后再试", http.StatusTooManyRequests)
+		return
+	}
 	u, err := a.DB.GetUserByName(username)
-	if err != nil || u.PasswordMD5 != strings.ToLower(password) {
+	hash := md5hex("\x00")
+	if err == nil && u != nil {
+		hash = strings.ToLower(u.PasswordMD5)
+	}
+	if err != nil || u == nil || !ctEqual(hash, password) {
+		a.gate().fail(key, time.Now())
 		http.Error(w, "用户名或密码错误", http.StatusUnauthorized)
+		a.audit(r, nil, "登录失败", "401")
 		return
 	}
 	if !u.Enable {
@@ -226,12 +225,13 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "用户已锁定", http.StatusForbidden)
 		return
 	}
+	a.gate().reset(key)
 	token := randToken()
 	urlToken := randToken()
 	exp := time.Now().Add(7 * 24 * time.Hour)
 	_ = a.DB.CreateSession(token, urlToken, u.ID, clientIP(r), exp)
 	_ = a.DB.TouchLogin(u.ID)
-	http.SetCookie(w, &http.Cookie{Name: "gbs_token", Value: token, Path: "/", HttpOnly: true, MaxAge: 7 * 24 * 3600})
+	a.setSessionCookie(w, r, token, 7*24*3600)
 	writeJSON(w, map[string]any{"CookieToken": token, "URLToken": urlToken, "TokenTimeout": 604800})
 	a.audit(r, u, "登录", "200")
 }
@@ -240,7 +240,7 @@ func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie("gbs_token"); err == nil {
 		a.DB.DeleteSession(c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: "gbs_token", Value: "", Path: "/", MaxAge: -1})
+	a.setSessionCookie(w, r, "", -1)
 	writeJSON(w, map[string]any{})
 }
 
@@ -257,6 +257,7 @@ func (a *API) userinfo(w http.ResponseWriter, r *http.Request) {
 		"PhoneNumber": u.PhoneNumber, "Email": u.Email, "Description": u.Description,
 		"HasAllChannel": u.HasAllChannel, "Cas": false, "OAuth": false,
 		"RemoteIP": clientIP(r), "LoginAt": u.LastLoginAt,
+		"PwdModReq": isDefaultPassword(u.PasswordMD5),
 	})
 }
 
@@ -272,6 +273,7 @@ func (a *API) serverinfo(w http.ResponseWriter, r *http.Request) {
 		"LogoText": a.Cfg.LogoText, "LogoMiniText": a.Cfg.LogoMiniText, "CopyrightText": a.Cfg.CopyrightText,
 		"Captcha": a.Cfg.Captcha, "MapEnable": a.Cfg.MapEnable,
 		"AllowStreamStartByURL": a.Cfg.AllowStreamStartByURL,
+		"PwdLength":             a.Cfg.PwdLength, "PwdLevel": a.Cfg.PwdLevel,
 	})
 }
 
@@ -282,24 +284,38 @@ func (a *API) modifyPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.ParseForm()
-	old := r.Form.Get("oldpassword")
+	old := strings.ToLower(strings.TrimSpace(r.Form.Get("oldpassword")))
 	if old == "" {
-		old = r.Form.Get("oldPassword")
+		old = strings.ToLower(strings.TrimSpace(r.Form.Get("oldPassword")))
 	}
-	np := r.Form.Get("newpassword")
+	np := strings.ToLower(strings.TrimSpace(r.Form.Get("newpassword")))
 	if np == "" {
-		np = r.Form.Get("newPassword")
+		np = strings.ToLower(strings.TrimSpace(r.Form.Get("newPassword")))
 	}
-	if u.PasswordMD5 != strings.ToLower(old) {
+	if len(np) != 32 || (len(old) != 32 && old != "") {
+		http.Error(w, "密码格式不正确", http.StatusBadRequest)
+		return
+	}
+	forced := isDefaultPassword(u.PasswordMD5) && (old == "" || old == md5hex(""))
+	if !forced && !ctEqual(strings.ToLower(u.PasswordMD5), old) {
 		http.Error(w, "原密码错误", http.StatusBadRequest)
 		return
 	}
-	if np == "" {
-		http.Error(w, "新密码为空", http.StatusBadRequest)
+	if ctEqual(old, np) {
+		http.Error(w, "新密码不能与原密码相同", http.StatusBadRequest)
 		return
 	}
-	_ = a.DB.SetUserPassword(u.ID, strings.ToLower(np))
+	if isDefaultPassword(np) {
+		http.Error(w, "不能使用初始密码", http.StatusBadRequest)
+		return
+	}
+	if err := a.DB.SetUserPassword(u.ID, np); err != nil {
+		http.Error(w, "保存密码失败", http.StatusInternalServerError)
+		return
+	}
+	a.DB.DeleteUserSessions(u.ID)
 	writeJSON(w, map[string]any{})
+	a.audit(r, u, "修改密码", "200")
 }
 
 func (a *API) restart(w http.ResponseWriter, r *http.Request) {
@@ -387,6 +403,9 @@ func (a *API) setPwdConfig(w http.ResponseWriter, r *http.Request) {
 	a.Cfg.Captcha = formBool(r, "Captcha", a.Cfg.Captcha)
 	if v := r.Form.Get("PwdLength"); v != "" {
 		a.Cfg.PwdLength = atoi(v, a.Cfg.PwdLength)
+	}
+	if v := r.Form.Get("PwdLevel"); v != "" {
+		a.Cfg.PwdLevel = atoi(v, a.Cfg.PwdLevel)
 	}
 	writeJSON(w, map[string]any{})
 }
@@ -847,6 +866,10 @@ func (a *API) buildStream(r *http.Request, ssrc string, dev *model.Device, ch *m
 	}
 	base := fmt.Sprintf("http://%s:%d", host, a.Cfg.SMSHTTPPort)
 	ws := fmt.Sprintf("ws://%s:%d", host, a.Cfg.SMSHTTPPort)
+	q := a.playQuery(ssrc)
+	if q != "" {
+		q = "?" + q
+	}
 	name := ch.Name
 	if ch.CustomName != "" {
 		name = ch.CustomName
@@ -856,12 +879,12 @@ func (a *API) buildStream(r *http.Request, ssrc string, dev *model.Device, ch *m
 		Transport: transport, StartAt: model.FormatTime(time.Now()), CallID: callID, SSRC: ssrc,
 		Playback: playback, StartTime: start, EndTime: end, AudioEnable: ch.AudioEnable,
 		Ondemand: ch.Ondemand, CloudRecord: ch.CloudRecord, ChannelPTZType: ch.PTZType,
-		FLV: base + "/live/" + ssrc + ".flv", WSFLV: ws + "/live/" + ssrc + ".flv",
-		HLS:     base + "/live/" + ssrc + "/index.m3u8",
+		FLV: base + "/live/" + ssrc + ".flv" + q, WSFLV: ws + "/live/" + ssrc + ".flv" + q,
+		HLS:     base + "/live/" + ssrc + "/index.m3u8" + q,
 		RTMP:    fmt.Sprintf("rtmp://%s:%d/live/%s", host, a.Cfg.SMSRTMPPort, ssrc),
 		RTSP:    fmt.Sprintf("rtsp://%s:%d/live/%s", host, a.Cfg.SMSRTSPPort, ssrc),
-		WEBRTC:  base + "/webrtc/play?stream=" + ssrc,
-		WHEP:    base + "/whep/" + ssrc,
+		WEBRTC:  base + "/webrtc/play?stream=" + ssrc + strings.Replace(q, "?", "&", 1),
+		WHEP:    base + "/whep/" + ssrc + q,
 		SnapURL: a.snapURL(dev.ID, ch.ID),
 	}
 }
@@ -914,6 +937,9 @@ func (a *API) refreshSnap(streamID, path string) {
 		host = "127.0.0.1"
 	}
 	src := fmt.Sprintf("http://%s:%d/live/%s.flv", host, a.Cfg.SMSHTTPPort, streamID)
+	if q := a.playQuery(streamID); q != "" {
+		src += "?" + q
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return
 	}
@@ -1261,14 +1287,6 @@ func first(r *http.Request, key string) string {
 		return v
 	}
 	return r.URL.Query().Get(key)
-}
-
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 func hostOnly(hostport string) string {
